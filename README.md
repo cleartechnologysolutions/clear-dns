@@ -1,6 +1,6 @@
 # Clear DNS
 
-DNS lookup, standard DNS scan, and mail health checker for Clear Technology Solutions.
+DNS lookup, standard DNS scan, common port check, and domain info tool for Clear Technology Solutions.
 
 Deploy command:
 

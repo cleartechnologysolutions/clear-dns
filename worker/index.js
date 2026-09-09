@@ -1,4 +1,7 @@
+import { connect } from "cloudflare:sockets";
+
 const DNS_ENDPOINT = "https://cloudflare-dns.com/dns-query";
+const RDAP_ENDPOINT = "https://rdap.org/domain/";
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "CAA"];
 
@@ -18,6 +21,30 @@ const STANDARD_HOSTS = [
 ];
 
 const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
+
+const COMMON_PORTS = [
+  [20, "FTP data"],
+  [21, "FTP"],
+  [22, "SSH"],
+  [23, "Telnet"],
+  [25, "SMTP, blocked by Cloudflare"],
+  [53, "DNS"],
+  [80, "HTTP"],
+  [110, "POP3"],
+  [143, "IMAP"],
+  [443, "HTTPS"],
+  [465, "SMTPS"],
+  [587, "SMTP submit"],
+  [993, "IMAPS"],
+  [995, "POP3S"],
+  [1433, "SQL Server"],
+  [3306, "MySQL"],
+  [3389, "RDP"],
+  [5432, "PostgreSQL"],
+  [5900, "VNC"],
+  [8080, "HTTP alt"],
+  [8443, "HTTPS alt"],
+];
 
 const TYPE_CODES = {
   A: 1,
@@ -173,6 +200,113 @@ async function standardScan(domain) {
   };
 }
 
+function findEntityName(entities = [], role) {
+  const entity = entities.find((item) => (item.roles || []).includes(role));
+  const vcard = entity?.vcardArray?.[1] || [];
+  const org = vcard.find((item) => item[0] === "org")?.[3];
+  const fn = vcard.find((item) => item[0] === "fn")?.[3];
+  return Array.isArray(org) ? org.filter(Boolean).join(" ") : org || fn || "";
+}
+
+function findEvent(events = [], action) {
+  return events.find((event) => event.eventAction === action)?.eventDate || "";
+}
+
+async function domainInfo(domain) {
+  const [rdapResult, ds, dnskey] = await Promise.all([
+    fetch(`${RDAP_ENDPOINT}${encodeURIComponent(domain)}`, {
+      headers: { accept: "application/rdap+json, application/json" },
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`RDAP lookup failed with HTTP ${response.status}`);
+        return response.json();
+      })
+      .catch((error) => ({ error: error.message || "RDAP lookup failed." })),
+    safeLookup(domain, "DS"),
+    safeLookup(domain, "DNSKEY"),
+  ]);
+
+  const nameservers = (rdapResult.nameservers || [])
+    .map((server) => server.ldhName || server.unicodeName)
+    .filter(Boolean);
+
+  const registrar = findEntityName(rdapResult.entities || [], "registrar");
+  const registrant = findEntityName(rdapResult.entities || [], "registrant");
+  const dsValues = ds.answers.map((answer) => answer.value);
+  const dnskeyValues = dnskey.answers.map((answer) => answer.value);
+
+  return {
+    domain,
+    registrar: registrar || "Unknown",
+    registrant: registrant || "Redacted or unavailable",
+    created: findEvent(rdapResult.events || [], "registration") || "Unknown",
+    updated: findEvent(rdapResult.events || [], "last changed") || "Unknown",
+    expires: findEvent(rdapResult.events || [], "expiration") || "Unknown",
+    status: rdapResult.status || [],
+    nameservers,
+    dnssec: dsValues.length ? "DS record found" : dnskeyValues.length ? "DNSKEY found, no DS seen" : "No DS/DNSKEY records found",
+    ds: dsValues,
+    dnskeyCount: dnskeyValues.length,
+    rdapError: rdapResult.error || "",
+  };
+}
+
+function isPrivateTarget(domain) {
+  return (
+    domain === "localhost" ||
+    domain.endsWith(".local") ||
+    /^10\./.test(domain) ||
+    /^127\./.test(domain) ||
+    /^169\.254\./.test(domain) ||
+    /^172\.(1[6-9]|2\d|3[0-1])\./.test(domain) ||
+    /^192\.168\./.test(domain)
+  );
+}
+
+async function checkPort(hostname, port, label) {
+  if (port === 25) {
+    return { port, label, status: "SKIPPED", detail: "Cloudflare Workers block outbound TCP 25.", ms: 0 };
+  }
+
+  const started = Date.now();
+  let timeoutId;
+
+  try {
+    const timeout = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => reject(new Error("Timed out")), 2800);
+    });
+    const socket = connect({ hostname, port });
+    await Promise.race([socket.opened, timeout]);
+    socket.close();
+    clearTimeout(timeoutId);
+    return { port, label, status: "OPEN", detail: "TCP connect succeeded", ms: Date.now() - started };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    return { port, label, status: "CLOSED", detail: error.message || "TCP connect failed", ms: Date.now() - started };
+  }
+}
+
+async function commonPortScan(domain) {
+  if (isPrivateTarget(domain)) {
+    throw new Error("Private and localhost targets are not supported from Cloudflare.");
+  }
+
+  const results = [];
+  const batchSize = 5;
+
+  for (let index = 0; index < COMMON_PORTS.length; index += batchSize) {
+    const batch = COMMON_PORTS.slice(index, index + batchSize);
+    results.push(...(await Promise.all(batch.map(([port, label]) => checkPort(domain, port, label)))));
+  }
+
+  return {
+    domain,
+    checked: results.length,
+    open: results.filter((result) => result.status === "OPEN").length,
+    results,
+  };
+}
+
 async function lookupDns(name, type) {
   const query = new URL(DNS_ENDPOINT);
   query.searchParams.set("name", name);
@@ -227,6 +361,14 @@ async function apiResponse(request) {
 
     if (mode === "audit") {
       return Response.json(await standardScan(domain), { headers: noStoreHeaders("application/json") });
+    }
+
+    if (mode === "domain") {
+      return Response.json(await domainInfo(domain), { headers: noStoreHeaders("application/json") });
+    }
+
+    if (mode === "ports") {
+      return Response.json(await commonPortScan(domain), { headers: noStoreHeaders("application/json") });
     }
 
     return Response.json(await lookupDns(domain, type), { headers: noStoreHeaders("application/json") });
@@ -537,6 +679,8 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard scan</button>
+            <button type="button" class="secondary" id="ports">Common ports</button>
+            <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="all">All common records</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
@@ -562,6 +706,8 @@ function pageResponse() {
     const domainInput = document.getElementById("domain");
     const typeInput = document.getElementById("type");
     const auditButton = document.getElementById("audit");
+    const portsButton = document.getElementById("ports");
+    const domainInfoButton = document.getElementById("domain-info");
     const allButton = document.getElementById("all");
     const mailButton = document.getElementById("mail");
     const copyButton = document.getElementById("copy");
@@ -718,6 +864,87 @@ function pageResponse() {
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
+    function renderPorts(data) {
+      resultTitle.textContent = "Common ports";
+      const lines = [
+        "CLEAR DNS COMMON PORT CHECK",
+        "Target: " + data.domain,
+        "Open:   " + data.open + " of " + data.checked,
+        "",
+        "PORT     STATUS    TIME      SERVICE",
+        "----     ------    ----      -------"
+      ];
+
+      for (const result of data.results) {
+        lines.push(
+          String(result.port).padEnd(8, " ") +
+          result.status.padEnd(10, " ") +
+          (result.ms ? String(result.ms) + "ms" : "").padEnd(10, " ") +
+          result.label
+        );
+      }
+
+      lines.push("");
+      lines.push("NOTE");
+      lines.push("----");
+      lines.push("This is a TCP connect check from Cloudflare, not a full security scan.");
+      lines.push("Port 25 is skipped because Cloudflare blocks outbound TCP 25.");
+
+      lastText = lines.join("\\n");
+      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
+    }
+
+    function renderDomainInfo(data) {
+      resultTitle.textContent = "Domain info";
+      const lines = [
+        "CLEAR DNS DOMAIN INFO",
+        "Domain:     " + data.domain,
+        "Registrar:  " + data.registrar,
+        "Registrant: " + data.registrant,
+        "Created:    " + data.created,
+        "Updated:    " + data.updated,
+        "Expires:    " + data.expires,
+        "DNSSEC:     " + data.dnssec,
+        ""
+      ];
+
+      lines.push("STATUS");
+      lines.push("------");
+      if (data.status && data.status.length) {
+        for (const status of data.status) lines.push(status);
+      } else {
+        lines.push("Unknown");
+      }
+
+      lines.push("");
+      lines.push("NAMESERVERS");
+      lines.push("-----------");
+      if (data.nameservers && data.nameservers.length) {
+        for (const server of data.nameservers) lines.push(server);
+      } else {
+        lines.push("Unknown");
+      }
+
+      lines.push("");
+      lines.push("DS RECORDS");
+      lines.push("----------");
+      if (data.ds && data.ds.length) {
+        for (const record of data.ds) lines.push(record);
+      } else {
+        lines.push("No DS records found");
+      }
+
+      if (data.rdapError) {
+        lines.push("");
+        lines.push("RDAP NOTE");
+        lines.push("---------");
+        lines.push(data.rdapError);
+      }
+
+      lastText = lines.join("\\n");
+      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
+    }
+
     async function runLookup(mode = "single") {
       const domain = cleanDomain(domainInput.value);
       if (!domain) {
@@ -744,6 +971,8 @@ function pageResponse() {
       }
 
       if (mode === "audit") renderAudit(data);
+      else if (mode === "ports") renderPorts(data);
+      else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") renderMail(data);
       else renderSingle(typeInput.value, data);
@@ -764,6 +993,22 @@ function pageResponse() {
     auditButton.addEventListener("click", async () => {
       try {
         await runLookup("audit");
+      } catch (error) {
+        setStatus(error.message || "Lookup failed.");
+      }
+    });
+
+    portsButton.addEventListener("click", async () => {
+      try {
+        await runLookup("ports");
+      } catch (error) {
+        setStatus(error.message || "Lookup failed.");
+      }
+    });
+
+    domainInfoButton.addEventListener("click", async () => {
+      try {
+        await runLookup("domain");
       } catch (error) {
         setStatus(error.message || "Lookup failed.");
       }
