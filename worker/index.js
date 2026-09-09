@@ -444,6 +444,22 @@ function pageResponse() {
       font-size: 14px;
       line-height: 1.45;
     }
+    .console-output {
+      margin: 0;
+      min-height: 520px;
+      overflow: auto;
+      white-space: pre;
+      color: #dbeafe;
+      font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+    .console-wrap {
+      padding: 16px;
+      border: 1px solid rgba(103, 232, 249, 0.18);
+      border-radius: 8px;
+      background: rgba(2, 6, 23, 0.48);
+    }
     .empty {
       display: grid;
       place-items: center;
@@ -643,25 +659,63 @@ function pageResponse() {
 
     function renderAudit(data) {
       resultTitle.textContent = "Standard scan";
-      const chunks = [
-        '<div class="pill"><strong>' + escapeText(data.found + " of " + data.checked + " checks found records") + '</strong><span>' + escapeText(data.domain) + '</span></div>'
-      ];
-      const text = [data.domain + " standard DNS scan", data.found + " of " + data.checked + " checks found records", ""];
-
-      for (const check of data.checks) {
-        chunks.push(
-          '<article class="record">' +
-          '<div class="record-top"><span>' + escapeText(check.name) + '</span><span>' + escapeText(check.type + " " + check.status) + '</span></div>' +
-          '<pre class="record-data">' + escapeText(formatAnswers(check.answers)) + '</pre>' +
-          '</article>'
-        );
-        text.push(check.name + " " + check.type + " " + check.status);
-        text.push(formatAnswers(check.answers));
-        text.push("");
+      const found = data.checks.filter((check) => check.answers.length);
+      const byType = {};
+      for (const check of found) {
+        byType[check.type] = byType[check.type] || [];
+        byType[check.type].push(check);
       }
 
-      results.innerHTML = chunks.join("");
-      lastText = text.join("\\n");
+      const lines = [
+        "CLEAR DNS STANDARD SCAN",
+        "Domain: " + data.domain,
+        "Found:  " + data.found + " of " + data.checked + " checks",
+        ""
+      ];
+
+      function section(title, types) {
+        lines.push(title);
+        lines.push("-".repeat(title.length));
+        let added = false;
+
+        for (const type of types) {
+          const checks = byType[type] || [];
+          for (const check of checks) {
+            for (const answer of check.answers) {
+              const left = (check.name + " " + check.type).padEnd(48, " ");
+              const ttl = answer.ttl ? ("TTL " + String(answer.ttl)).padEnd(10, " ") : "".padEnd(10, " ");
+              lines.push(left + ttl + answer.value);
+              added = true;
+            }
+          }
+        }
+
+        if (!added) lines.push("No records found");
+        lines.push("");
+      }
+
+      section("A / AAAA RECORDS", ["A", "AAAA"]);
+      section("CNAME RECORDS", ["CNAME"]);
+      section("MX RECORDS", ["MX"]);
+      section("TXT / AUTH RECORDS", ["TXT"]);
+      section("NS / SOA / CAA RECORDS", ["NS", "SOA", "CAA"]);
+
+      const missingImportant = data.checks
+        .filter((check) => !check.answers.length)
+        .filter((check) => ["www", "mail", "autodiscover", "vpn", "remote", "_dmarc"].some((name) => check.name.startsWith(name + ".") || check.name === "_dmarc." + data.domain));
+
+      lines.push("NOT FOUND, COMMON CHECKS");
+      lines.push("------------------------");
+      if (missingImportant.length) {
+        for (const check of missingImportant) {
+          lines.push((check.name + " " + check.type).padEnd(48, " ") + check.status);
+        }
+      } else {
+        lines.push("No common misses to call out.");
+      }
+
+      lastText = lines.join("\\n");
+      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
     async function runLookup(mode = "single") {
