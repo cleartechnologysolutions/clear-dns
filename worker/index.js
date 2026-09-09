@@ -1,7 +1,7 @@
 import { connect } from "cloudflare:sockets";
 
 const DNS_ENDPOINT = "https://cloudflare-dns.com/dns-query";
-const RDAP_ENDPOINT = "https://rdap.org/domain/";
+const RDAP_BOOTSTRAP_ENDPOINT = "https://data.iana.org/rdap/dns.json";
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "CAA"];
 
@@ -212,23 +212,71 @@ function findEvent(events = [], action) {
   return events.find((event) => event.eventAction === action)?.eventDate || "";
 }
 
+async function fetchJson(url) {
+  const response = await fetch(url, {
+    headers: {
+      accept: "application/rdap+json, application/json",
+      "user-agent": "ClearDNS/1.0",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`HTTP ${response.status}`);
+  }
+
+  return response.json();
+}
+
+async function rdapLookup(domain) {
+  const tld = domain.split(".").pop();
+  const errors = [];
+
+  try {
+    const bootstrap = await fetchJson(RDAP_BOOTSTRAP_ENDPOINT);
+    const service = (bootstrap.services || []).find(([tlds]) => tlds.includes(tld));
+
+    if (service) {
+      for (const baseUrl of service[1]) {
+        try {
+          return await fetchJson(`${baseUrl.replace(/\/$/, "")}/domain/${encodeURIComponent(domain)}`);
+        } catch (error) {
+          errors.push(`${baseUrl}: ${error.message}`);
+        }
+      }
+    }
+  } catch (error) {
+    errors.push(`IANA bootstrap: ${error.message}`);
+  }
+
+  const fallbackUrls = [
+    `https://rdap.verisign.com/${encodeURIComponent(tld)}/v1/domain/${encodeURIComponent(domain)}`,
+    `https://rdap.publicinterestregistry.org/rdap/domain/${encodeURIComponent(domain)}`,
+  ];
+
+  for (const url of fallbackUrls) {
+    try {
+      return await fetchJson(url);
+    } catch (error) {
+      errors.push(`${url}: ${error.message}`);
+    }
+  }
+
+  return { error: errors.join("; ") || "RDAP lookup failed." };
+}
+
 async function domainInfo(domain) {
-  const [rdapResult, ds, dnskey] = await Promise.all([
-    fetch(`${RDAP_ENDPOINT}${encodeURIComponent(domain)}`, {
-      headers: { accept: "application/rdap+json, application/json" },
-    })
-      .then(async (response) => {
-        if (!response.ok) throw new Error(`RDAP lookup failed with HTTP ${response.status}`);
-        return response.json();
-      })
-      .catch((error) => ({ error: error.message || "RDAP lookup failed." })),
+  const [rdapResult, ds, dnskey, ns] = await Promise.all([
+    rdapLookup(domain),
     safeLookup(domain, "DS"),
     safeLookup(domain, "DNSKEY"),
+    safeLookup(domain, "NS"),
   ]);
 
-  const nameservers = (rdapResult.nameservers || [])
+  const rdapNameservers = (rdapResult.nameservers || [])
     .map((server) => server.ldhName || server.unicodeName)
     .filter(Boolean);
+  const dnsNameservers = ns.answers.map((answer) => answer.value.replace(/\.$/, ""));
+  const nameservers = rdapNameservers.length ? rdapNameservers : dnsNameservers;
 
   const registrar = findEntityName(rdapResult.entities || [], "registrar");
   const registrant = findEntityName(rdapResult.entities || [], "registrant");
@@ -759,22 +807,33 @@ function pageResponse() {
 
     function renderAll(data) {
       resultTitle.textContent = "All common records";
-      const chunks = [];
-      const text = [];
+      const lines = [
+        "CLEAR DNS COMMON RECORDS",
+        "Record types: A, AAAA, CNAME, MX, TXT, NS, SOA, CAA",
+        ""
+      ];
+
       for (const [type, response] of Object.entries(data)) {
+        lines.push(type + " RECORDS");
+        lines.push("-".repeat(type.length + 8));
         const answers = response.Answer || [];
+
         if (!answers.length) {
-          chunks.push('<article class="record"><div class="record-top"><span>' + escapeText(type) + '</span><span>' + escapeText(response.StatusText || response.Status) + '</span></div><pre class="record-data">No records found</pre></article>');
-          text.push(type + ": No records found");
+          lines.push("No records found (" + (response.StatusText || response.Status) + ")");
+          lines.push("");
           continue;
         }
+
         for (const record of answers) {
-          chunks.push(recordHtml(type, record, response.StatusText));
-          text.push(type + " " + record.data);
+          const ttl = record.TTL ? ("TTL " + String(record.TTL)).padEnd(10, " ") : "".padEnd(10, " ");
+          lines.push(ttl + record.data);
         }
+
+        lines.push("");
       }
-      results.innerHTML = chunks.join("");
-      lastText = text.join("\\n");
+
+      lastText = lines.join("\\n");
+      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
     function renderMail(data) {
@@ -867,24 +926,35 @@ function pageResponse() {
     function renderPorts(data) {
       resultTitle.textContent = "Common ports";
       const lines = [
-        "CLEAR DNS COMMON PORT CHECK",
+        "CLEAR DNS COMMON PORTS",
         "Target: " + data.domain,
         "Open:   " + data.open + " of " + data.checked,
-        "",
-        "PORT     STATUS    TIME      SERVICE",
-        "----     ------    ----      -------"
+        ""
       ];
 
-      for (const result of data.results) {
-        lines.push(
-          String(result.port).padEnd(8, " ") +
-          result.status.padEnd(10, " ") +
-          (result.ms ? String(result.ms) + "ms" : "").padEnd(10, " ") +
-          result.label
-        );
+      function portSection(title, status) {
+        const matches = data.results.filter((result) => result.status === status);
+        lines.push(title);
+        lines.push("-".repeat(title.length));
+
+        if (!matches.length) {
+          lines.push("None");
+          lines.push("");
+          return;
+        }
+
+        for (const result of matches) {
+          const port = String(result.port).padEnd(8, " ");
+          const time = (result.ms ? String(result.ms) + "ms" : "").padEnd(10, " ");
+          lines.push(port + time + result.label);
+        }
+        lines.push("");
       }
 
-      lines.push("");
+      portSection("OPEN PORTS", "OPEN");
+      portSection("CLOSED / FILTERED PORTS", "CLOSED");
+      portSection("SKIPPED PORTS", "SKIPPED");
+
       lines.push("NOTE");
       lines.push("----");
       lines.push("This is a TCP connect check from Cloudflare, not a full security scan.");
