@@ -2,6 +2,23 @@ const DNS_ENDPOINT = "https://cloudflare-dns.com/dns-query";
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "CAA"];
 
+const STANDARD_HOSTS = [
+  "www",
+  "mail",
+  "autodiscover",
+  "autoconfig",
+  "smtp",
+  "imap",
+  "pop",
+  "vpn",
+  "remote",
+  "portal",
+  "owa",
+  "webmail",
+];
+
+const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
+
 const TYPE_CODES = {
   A: 1,
   NS: 2,
@@ -91,6 +108,71 @@ function summarizeMail(domain, results) {
   };
 }
 
+function answerValues(response) {
+  return (response.Answer || []).map((record) => ({
+    ttl: record.TTL || 0,
+    value: record.data || "",
+  }));
+}
+
+async function safeLookup(name, type) {
+  try {
+    const response = await lookupDns(name, type);
+    return {
+      status: response.StatusText,
+      answers: answerValues(response),
+    };
+  } catch (error) {
+    return {
+      status: "ERROR",
+      answers: [],
+      error: error.message || "Lookup failed.",
+    };
+  }
+}
+
+async function standardScan(domain) {
+  const rootChecks = DNS_TYPES.map(async (type) => ({
+    name: domain,
+    type,
+    ...(await safeLookup(domain, type)),
+  }));
+
+  const hostChecks = STANDARD_HOSTS.flatMap((host) => {
+    const name = `${host}.${domain}`;
+    return ["A", "CNAME"].map(async (type) => ({
+      name,
+      type,
+      ...(await safeLookup(name, type)),
+    }));
+  });
+
+  const dmarcCheck = async () => ({
+    name: `_dmarc.${domain}`,
+    type: "TXT",
+    ...(await safeLookup(`_dmarc.${domain}`, "TXT")),
+  });
+
+  const dkimChecks = DKIM_SELECTORS.map(async (selector) => {
+    const name = `${selector}._domainkey.${domain}`;
+    return {
+      name,
+      type: "TXT",
+      ...(await safeLookup(name, "TXT")),
+    };
+  });
+
+  const checks = await Promise.all([...rootChecks, ...hostChecks, dmarcCheck(), ...dkimChecks]);
+  const found = checks.filter((check) => check.answers.length);
+
+  return {
+    domain,
+    checked: checks.length,
+    found: found.length,
+    checks,
+  };
+}
+
 async function lookupDns(name, type) {
   const query = new URL(DNS_ENDPOINT);
   query.searchParams.set("name", name);
@@ -141,6 +223,10 @@ async function apiResponse(request) {
         summarizeMail(domain, { MX: mx, TXT: txt, DMARC: dmarc }),
         { headers: noStoreHeaders("application/json") }
       );
+    }
+
+    if (mode === "audit") {
+      return Response.json(await standardScan(domain), { headers: noStoreHeaders("application/json") });
     }
 
     return Response.json(await lookupDns(domain, type), { headers: noStoreHeaders("application/json") });
@@ -434,6 +520,7 @@ function pageResponse() {
           </div>
 
           <div class="actions">
+            <button type="button" class="secondary" id="audit">Standard scan</button>
             <button type="button" class="secondary" id="all">All common records</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
@@ -458,6 +545,7 @@ function pageResponse() {
     const form = document.getElementById("lookup-form");
     const domainInput = document.getElementById("domain");
     const typeInput = document.getElementById("type");
+    const auditButton = document.getElementById("audit");
     const allButton = document.getElementById("all");
     const mailButton = document.getElementById("mail");
     const copyButton = document.getElementById("copy");
@@ -545,6 +633,37 @@ function pageResponse() {
       lastText = JSON.stringify(data, null, 2);
     }
 
+    function formatAnswers(answers) {
+      if (!answers.length) return "No records found";
+      return answers.map((answer) => {
+        const ttl = answer.ttl ? "TTL " + answer.ttl + "  " : "";
+        return ttl + answer.value;
+      }).join("\\n");
+    }
+
+    function renderAudit(data) {
+      resultTitle.textContent = "Standard scan";
+      const chunks = [
+        '<div class="pill"><strong>' + escapeText(data.found + " of " + data.checked + " checks found records") + '</strong><span>' + escapeText(data.domain) + '</span></div>'
+      ];
+      const text = [data.domain + " standard DNS scan", data.found + " of " + data.checked + " checks found records", ""];
+
+      for (const check of data.checks) {
+        chunks.push(
+          '<article class="record">' +
+          '<div class="record-top"><span>' + escapeText(check.name) + '</span><span>' + escapeText(check.type + " " + check.status) + '</span></div>' +
+          '<pre class="record-data">' + escapeText(formatAnswers(check.answers)) + '</pre>' +
+          '</article>'
+        );
+        text.push(check.name + " " + check.type + " " + check.status);
+        text.push(formatAnswers(check.answers));
+        text.push("");
+      }
+
+      results.innerHTML = chunks.join("");
+      lastText = text.join("\\n");
+    }
+
     async function runLookup(mode = "single") {
       const domain = cleanDomain(domainInput.value);
       if (!domain) {
@@ -570,7 +689,8 @@ function pageResponse() {
         throw new Error(data.error || "Lookup failed.");
       }
 
-      if (mode === "all") renderAll(data);
+      if (mode === "audit") renderAudit(data);
+      else if (mode === "all") renderAll(data);
       else if (mode === "mail") renderMail(data);
       else renderSingle(typeInput.value, data);
 
@@ -584,6 +704,14 @@ function pageResponse() {
       } catch (error) {
         setStatus(error.message || "Lookup failed.");
         results.innerHTML = '<div class="empty">Lookup failed.</div>';
+      }
+    });
+
+    auditButton.addEventListener("click", async () => {
+      try {
+        await runLookup("audit");
+      } catch (error) {
+        setStatus(error.message || "Lookup failed.");
       }
     });
 
