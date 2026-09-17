@@ -7,7 +7,7 @@ const MAX_CERTIFICATE_NAMES = 1000;
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "CAA"];
 
-const STANDARD_HOSTS = [
+const ORIGINAL_HOSTS = [
   "www",
   "mail",
   "autodiscover",
@@ -109,6 +109,30 @@ const STANDARD_HOSTS = [
   "gitlab",
   "helpdesk",
 ];
+
+// These are hostname guesses, not evidence that a company uses a vendor.
+// Preserve earlier coverage and deduplicate names shared by categories.
+const HOST_GROUPS = {
+  mail: "email mx smtp pop imap webmail mail3 mx4 smtp3 pop2 imaps smtps relay mailrelay inbound outbound inbound-mail outbound-mail mailgw mailgateway antispam spam spamfilter quarantine mimecast proofpoint barracuda spf dkim dmarc mta mta-sts autodiscover autoconfig lists listserv newsletter newsletters emailtracking tracking click links sendgrid mailgun postmark mandrill amazonses sendinblue brevo mailchimp",
+  environments: "app apps api api2 api-v2 graphql rest ws websocket dev development stage staging test testing qa uat prod production beta demo sandbox preview preprod acceptance integration lab labs playground pilot poc review canary api.dev api.staging api.test dev.api staging.api test.api dev.www staging.www test.www",
+  development: "git github gitlab bitbucket code source repos repository svn hg ci cd build builds jenkins bamboo teamcity travis circleci drone argo argocd pipelines devops artifacts artifactory nexus packages npm pypi nuget maven registry docker harbor containers k8s kubernetes rancher openshift portainer sonar sonarqube sentry bugs bugzilla redmine youtrack jira confluence atlassian crucible fisheye gerrit gitea forgejo",
+  identity: "login auth sso identity accounts account id ids idp adfs sts saml oauth oauth2 oidc openid signon signin okta auth0 onelogin ping pingidentity duo keycloak ldap directory password passwords reset myaccount signup register registration mfa verify access accessmanager authentik vault secrets cyberark beyondtrust teleport pam",
+  management: "portal secure gateway gw admin panel manage management manager monitor monitoring dashboard dashboards console control controlpanel cockpit webadmin adminportal plesk whm cpanel directadmin webmin whmcs",
+  public: "blog news media press newsroom events event calendar podcasts podcast videos tv live stream streaming radio webinar webinars about contact partners partner partnerportal customers customer members member my home landing mobile touch welcome community forum forums discuss discourse groups wiki kb knowledge knowledgebase learn learning training academy education university docs documentation developers developer careers jobs recruitment recruiting talent volunteers",
+  commerce: "shop store cart pay payments payment checkout billing invoice invoices subscriptions subscribe orders order ecommerce commerce pos marketplace catalog catalogue products sales salesforce salesforcehr crm dynamics dynamics365 hubspot zoho pipedrive freshsales sugarcrm insightly netsuite oracle sap erp odoo magento shopify woocommerce bigcommerce stripe paypal braintree adyen square chargebee recurly zuora",
+  support: "support help helpdesk servicedesk service-desk service services tickets ticket ticketing zendesk freshdesk freshservice intercom helpscout desk service-now servicenow remedy connectwise autotask halo halopsa kaseya nable n-central ninja ninjaone atera syncro rmm screenconnect bomgar rescue teamviewer splashtop anydesk supportportal assist assistance feedback status statuspage incident incidents uptime",
+  departments: "hr finance legal marketing accounting payroll benefits employees employee staff people peopleops personnel workday bamboohr adp paychex paylocity ukg kronos gusto rippling successfactors recruiting greenhouse lever smartrecruiters icims taleo ashby procurement purchasing expenses expense travel concur coupa suppliers vendor vendors sourcing operations ops facilities safety security compliance privacy trust contracts docusign hellosign adobe esign signature signatures board executive investor investors ir",
+  collaboration: "slack teams meet meetings meeting zoom webex skype lync sip lyncext meetext dialin voice voip phone phones pbx asterisk freepbx 3cx ringcentral talk chat mattermost rocket rocketchat matrix element jabber xmpp jitsi bluejeans gotomeeting mural miro notion trello asana monday clickup airtable smartsheet basecamp wrike todo tasks projects project planner sharepoint onedrive share drive dropbox box nextcloud owncloud seafile onlyoffice collabora workspace office office365 o365 microsoft365 m365 outlook exchange online webapps intranet extranet yammer viva intune mdm enrollment enroll enterpriseenrollment enterpriseregistration companyportal endpoint jamf kandji mosyle meraki workspaceone airwatch mobileiron ivanti sccm wsus updates update patches",
+  assets: "cdn cdn1 cdn2 static static1 static2 assets asset img images image media download downloads upload uploads content resources public storage objects s3 bucket buckets backup backups restore archive archives files file ftp sftp ftps tftp rsync mirror mirrors repository dist releases release install installer software binaries packages fonts js css video audio thumbnails photos pictures gallery cache",
+  infrastructure: "cloud aws azure gcp google amazon digitalocean linode vultr rackspace cloudflare fastly akamai incapsula imperva edge origin origin-www origin-api direct lb loadbalancer proxy proxy1 proxy2 reverseproxy nginx haproxy traefik varnish gateway gw vpn1 vpn2 sslvpn vpnportal wireguard openvpn globalprotect fortigate fortinet sonicwall checkpoint paloalto zscaler prisma sdwan bastion jump jumphost jumpbox ssh remoteaccess vdi horizon vmware vcenter esxi proxmox hyperv nutanix xen citrix storefront netscaler director virtual appsremote rd rdweb rds rdp remote desktop desktops terminal terminalserver ts tsweb ts1 ts2 rdgateway rdsgateway dhcp ntp time radius nac ise clearpass ipam netbox dc dc1 dc2 ad active-directory domaincontroller ns4 ns5 dns3 dns4 bind powerdns resolver dnsadmin dnsmanager nslookup whois",
+  observability: "metrics prometheus grafana alertmanager alerts alert kibana elastic elasticsearch opensearch log logs logging logstash graylog splunk datadog newrelic appdynamics dynatrace apm tracing traces jaeger zipkin otel opentelemetry honeycomb sumologic loki nagios zabbix icinga prtg cacti observium librenms checkmk opmanager solarwinds uptime kuma health healthcheck heartbeat sensu telegraf influx influxdb chronograf kapacitor stats statistics analytics matomo piwik plausible umami clarity hotjar segment mixpanel amplitude metabase superset tableau powerbi bi reports reporting report looker redash qlik geckoboard",
+  data: "db database databases sql mysql mariadb postgres postgresql pg pgadmin pma phpmyadmin adminer mssql mongo mongodb redis memcached couchdb couchbase cassandra clickhouse cockroachdb timescale timescaledb influxdb neo4j orientdb snowflake databricks redshift bigquery data warehouse lake lakehouse kafka rabbitmq activemq queue mq nats pulsar zookeeper consul etcd minio ceph swift hdfs hadoop spark airflow prefect dagster nifi flink jupyter notebook notebooks rstudio ml ai llm ollama inference models model mlflow kubeflow h2o feast vector search solr sphinx typesense meilisearch algolia elasticsearch",
+  regional: "us usa uk eu europe au australia ca canada de fr es it nl ie jp cn in apac emea na latam en eng www3 www4 www5 web1 web2 server1 server2 host1 host2 east west central us-east us-west eu-west eu-central ap-south ap-southeast",
+};
+const STANDARD_HOSTS = [...new Set([
+  ...ORIGINAL_HOSTS,
+  ...Object.values(HOST_GROUPS).flatMap(names => names.split(" ")),
+])];
 
 const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
 
@@ -355,6 +379,7 @@ async function standardScan(domain, offset = 0) {
     found: checks.filter(check => check.answers.length).length,
     checks,
     total: tasks.length,
+    hostCount: STANDARD_HOSTS.length,
     nextOffset: offset + batch.length < tasks.length ? offset + batch.length : null,
   };
 }
@@ -883,7 +908,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 10</p>
+          <p class="brand-subtitle">Build 11</p>
         </div>
       </div>
     </header>
@@ -1048,7 +1073,7 @@ function pageResponse() {
       const lines = [
         "DNS STANDARD RECORDS",
         "Domain: " + data.domain,
-        "Scope:  100 common hostnames + root/mail records + crt.sh discovery",
+        "Scope:  " + data.hostCount + " service/vendor hostnames + root/mail records + crt.sh discovery",
         "Found:  " + data.found + " of " + data.checked + " checks",
         ""
       ];
@@ -1206,6 +1231,7 @@ function pageResponse() {
       }
 
       if (mode === "audit") {
+        renderAudit(data);
         while (data.nextOffset !== null && data.nextOffset !== undefined) {
           setStatus("Checking Standard Records: " + data.checked + " of " + data.total + "...");
           api.searchParams.set("offset", data.nextOffset);
@@ -1219,6 +1245,7 @@ function pageResponse() {
             found: data.found + batch.found,
             checks: data.checks.concat(batch.checks),
           };
+          renderAudit(data);
         }
         // Show standard results immediately while the certificate search runs.
         renderAudit(data);

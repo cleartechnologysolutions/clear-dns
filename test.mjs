@@ -44,7 +44,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 10/);
+assert.match(html, /Build 11/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -73,22 +73,27 @@ await client.run("audit");
 
 const requested = "www mail ftp webmail smtp pop web cpanel m imap test blog pop3 dev secure api admin whm forum remote vpn app shop store support portal server news staging host beta crm en mx1 sso status billing docs chat video cloud sql login uat db connect".split(" ");
 const hosts = vm.runInContext("STANDARD_HOSTS", server);
-assert.equal(hosts.length, 100);
-assert.equal(new Set(hosts).size, 100);
+assert.equal(hosts.length, 914);
+assert.equal(new Set(hosts).size, 914);
+const additions = "email mx stage qa prod demo sandbox preview ci cd build auth identity gw panel manage press cart pay help jobs careers community cdn static assets img images download jira confluence zendesk slack salesforce hr finance legal marketing okta workday servicenow teams sharepoint intune screenconnect datadog prometheus airwatch splunk azure aws gitlab bitbucket api.staging".split(" ");
+for (const name of additions) assert.ok(hosts.includes(name), "Missing " + name);
+for (const host of hosts) assert.match(host, /^[a-z0-9]+(?:[-.][a-z0-9]+)*$/);
 for (const name of [...requested, "autodiscover", "autoconfig", "owa"]) assert.ok(hosts.includes(name));
 for (const host of hosts) {
   for (const type of ["A", "AAAA", "CNAME"]) {
     assert.equal(queries.filter(([name, t]) => name === host + ".example.com" && t === type).length, 1, host + " " + type);
   }
 }
-assert.deepEqual(batches, [40, 40, 40, 40, 40, 40, 40, 33, 0, 40, 14]);
+assert.deepEqual(batches, [...Array(68).fill(40), 35, 0, 40, 14]);
 assert.ok(peak <= 6);
-assert.equal(queries.length, 367);
+assert.equal(queries.length, 2809);
 assert.equal(crtCalls, 1);
 assert.equal(elements.get("result-title").textContent, "Standard Records");
 assert.equal(elements.get("status").textContent, "Done.");
 const report = client.report();
-assert.match(report, /Found:  232 of 367 checks/);
+assert.match(report, /Found:  1860 of 2809 checks/);
+assert.match(report, /Scope:  914 service\/vendor hostnames/);
+for (const name of additions) assert.ok(report.includes(name + ".example.com A"), "Missing resolved host " + name);
 assert.match(report, /connect.example.com A/);
 assert.match(report, /connect.example.com CNAME/);
 assert.match(report, /db.example.com CNAME/);
