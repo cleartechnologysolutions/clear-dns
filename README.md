@@ -10,7 +10,8 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
-Build 12 adds wildcard detection to Standard Records, with 914 unique hostnames checking A, AAAA
+Build 13 fixes wildcard filtering and always retains crt.sh discoveries.
+Standard Records includes 914 unique hostnames checking A, AAAA
 and CNAME for each. This is a curated practical list, not a measured popularity
 ranking. It covers mail, development environments, source control and CI,
 identity providers, management consoles, public sites, commerce, help desks,
@@ -26,36 +27,43 @@ The 2,755 standard DNS checks run automatically across 69 API requests, at most
 combined into the existing text report, updated after every completed batch.
 The progress message shows how many checks have completed; the expanded scan
 takes longer than the old 100-name list. Unresolved checks and empty record
-sections are hidden.
+sections are hidden for guessed names. Certificate discoveries are always listed.
 
 Standard Records also searches crt.sh certificate history automatically.
 Discovered hostnames are deduplicated and scoped to the entered domain, then
 checked for current A, AAAA and CNAME records. Already-completed checks are
-not repeated. Additional answers are marked [crt.sh] in the same report.
-Wildcard certificates are not expanded into guessed hostnames.
+not repeated. All answers for certificate-discovered names are marked [crt.sh],
+including overlaps already checked by Standard Records. These names are exempt
+from wildcard filtering. Certificate names without DNS answers appear in a
+separate history section with their lookup status. Wildcard certificate patterns
+are also displayed as history, never expanded into guessed hosts or queried as hosts.
 
 This is DNS discovery, not a zone-file transfer or a complete inventory.
 Vendor guesses do not establish that an organization uses that vendor.
 Certificate history is not a complete inventory of DNS records. Old certificate
-names without current DNS answers are hidden. A crt.sh failure leaves standard
+names without current DNS answers remain visible as certificate history, not
+as verified current DNS records. A crt.sh failure leaves standard
 results visible with a short status message. The provider request times out
 after 15 seconds and has an 8 MiB response cap; discovery checks at most 1,000
-unique hostnames, with an explicit note when that hostname limit is reached.
+unique certificate names/patterns, with an explicit note when that limit is reached.
 Additional DNS checks run in batches of at most 40, with six at a time.
 Wildcard filtering:
 - Three random hostnames are checked for A, AAAA and CNAME at each relevant
-  parent (including nested parents from the built-in list and crt.sh).
+  parent in the built-in list. Certificate names are exempt and need no probes.
 - A type is considered a wildcard candidate only if all three probes answer.
   Comparisons ignore TTL, CNAME case and a trailing dot. The observed address
   pool covers rotations seen during the probes; unseen rotations may stay visible.
 - Names whose positive answers all match the observed pool are hidden by default.
-  The domain apex, distinct addresses/aliases, and names with failed or incomplete
-  checks stay visible. Matching explicit records can be hidden too: this is a
+  The domain apex (@), www, certificate names, and distinct addresses/aliases
+  stay visible. A failed AAAA or CNAME lookup no longer exempts a matching A
+  answer. Probe baselines are evaluated per type: three successful A probes
+  still count if AAAA probing failed. Matching explicit records can be hidden too: this is a
   heuristic, not proof that a name does not exist.
 - Use "Show likely wildcard results" to inspect uncertain matches in a separate
   text section. No new queries run when toggling, and Copy uses the visible report.
 - Counts distinguish resolved checks from likely wildcard names. Random probes
-  are excluded from record totals. Probe failures are reported and leave results visible.
+  are excluded from record totals. Probe failures are reported; answers without
+  a confirmed baseline for their type stay visible.
 - Each probe request handles at most four parent scopes (36 queries), with at
   most six concurrent DNS lookups. Up to 100 parent scopes are tested per scan;
   untested/overlong scopes remain visible with an incomplete-detection notice.
@@ -66,6 +74,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 12 beneath it.
+The page will read DNS Tools with Build 13 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

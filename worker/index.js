@@ -297,20 +297,27 @@ function isDomainHostname(name, domain) {
 function certificateNames(rows, domain) {
   if (!Array.isArray(rows)) throw new Error("crt.sh returned an unexpected response.");
   const names = new Set();
+  const patterns = new Set();
   let limited = false;
   for (const row of rows) {
-    // A wildcard certificate does not identify a concrete host: never guess one.
+    // Keep wildcard certificate patterns as history without inventing hosts.
     for (const field of [row?.name_value, row?.common_name]) {
       if (typeof field !== "string") continue;
       for (const value of field.split(/\r?\n/)) {
         const name = value.trim().toLowerCase().replace(/\.$/, "");
+        if (name.startsWith("*.") && isDomainHostname(name.slice(2), domain)) {
+          if (patterns.has(name)) continue;
+          if (names.size + patterns.size >= MAX_CERTIFICATE_NAMES) { limited = true; continue; }
+          patterns.add(name);
+          continue;
+        }
         if (!isDomainHostname(name, domain) || names.has(name)) continue;
-        if (names.size >= MAX_CERTIFICATE_NAMES) { limited = true; continue; }
+        if (names.size + patterns.size >= MAX_CERTIFICATE_NAMES) { limited = true; continue; }
         names.add(name);
       }
     }
   }
-  return { names: [...names].sort(), limited };
+  return { names: [...names].sort(), patterns: [...patterns].sort(), limited };
 }
 
 async function discoverCertificateNames(domain) {
@@ -617,7 +624,8 @@ async function apiResponse(request) {
         const incomplete = checks.some(check => !["NOERROR", "NXDOMAIN"].includes(check.status));
         for (const type of ["A", "AAAA", "CNAME"]) {
           const samples = checks.filter(check => check.type === type);
-          if (!incomplete && samples.every(check => check.status === "NOERROR" && check.answers.length)) {
+          // A failed AAAA probe must not invalidate three successful A probes.
+          if (samples.every(check => check.status === "NOERROR" && check.answers.length)) {
             values[type] = [...new Set(samples.flatMap(check => check.answers.map(answer => answer.value.toLowerCase().replace(/\.$/, ""))))];
           }
         }
@@ -934,7 +942,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 12</p>
+          <p class="brand-subtitle">Build 13</p>
         </div>
       </div>
     </header>
@@ -1106,13 +1114,15 @@ function pageResponse() {
         names.get(check.name).push(check);
       }
       const uncertain = new Set();
+      const certificateNames = new Set(data.certificateNames || []);
       for (const [name, checks] of names) {
-        if (name === data.domain) continue;
+        if (name === data.domain || name === "www." + data.domain || certificateNames.has(name) ||
+            checks.some(check => check.source === "crt.sh")) continue;
         const scope = name.slice(name.indexOf(".") + 1);
         const profile = (data.wildcards || []).find(item => item.scope === scope);
-        // Wait for every type; keep names with a distinct alias/address or an error.
-        if (!profile || profile.incomplete || checks.length !== 3 ||
-            checks.some(check => !["NOERROR", "NXDOMAIN"].includes(check.status))) continue;
+        // Wait until all types have been attempted. An unrelated failed type
+        // does not exempt a matching positive answer; a distinct answer does.
+        if (!profile || checks.length !== 3) continue;
         const positive = checks.filter(check => check.answers.length);
         if (positive.length && positive.every(check => check.answers.every(answer =>
             (profile.values[check.type] || []).includes(answer.value.toLowerCase().replace(/\\.$/, ""))))) {
@@ -1140,10 +1150,11 @@ function pageResponse() {
       if (detected.length) {
         lines.push("WILDCARD DNS DETECTED");
         for (const item of detected) lines.push("*." + item.scope + ": " + Object.entries(item.values).map(([type, values]) => type + " " + values.join(", ")).join("; "));
-        lines.push("Matching names are uncertain: explicit records can share these answers.", "");
+        lines.push("Matching names are uncertain: explicit records can share these answers.");
+        lines.push("Always retained: root (@), www, and crt.sh discoveries (certificate-only entries listed separately).", "");
       } else if (wildcards.some(item => !item.incomplete)) lines.push("No wildcard answers detected in completed probes.", "");
       if (data.wildcardIncomplete || wildcards.some(item => item.incomplete)) {
-        lines.push("Wildcard detection incomplete. Results in unverified scopes remain visible.", "");
+        lines.push("Wildcard detection incomplete. Confirmed record types are filtered; unverified types remain visible.", "");
       }
       if (data.crtNote) lines.push(data.crtNote, "");
       const failures = data.checks.filter(check => !["NOERROR", "NXDOMAIN"].includes(check.status)).length;
@@ -1174,6 +1185,22 @@ function pageResponse() {
       section("MX RECORDS", ["MX"]);
       section("TXT / AUTH RECORDS", ["TXT"]);
       section("NS / SOA / CAA RECORDS", ["NS", "SOA", "CAA"]);
+
+      const resolvedNames = new Set(resolved.map(check => check.name));
+      const historyNames = [...certificateNames].filter(name => !resolvedNames.has(name));
+      const patterns = data.certificatePatterns || [];
+      if (historyNames.length || patterns.length) {
+        lines.push("CERTIFICATE HISTORY — NO CURRENT DNS ANSWER", "------------------------------------------");
+        for (const name of historyNames) {
+          const checks = names.get(name) || [];
+          const state = checks.length < 3 ? "DNS not yet checked" :
+            checks.some(check => !["NOERROR", "NXDOMAIN"].includes(check.status)) ? "DNS check incomplete" :
+            "No current A/AAAA/CNAME answer";
+          lines.push(name + "  [crt.sh] " + state);
+        }
+        for (const pattern of patterns) lines.push(pattern + "  [crt.sh] Wildcard certificate pattern; not a specific host");
+        lines.push("Certificate history does not establish a current DNS record or active service.", "");
+      }
 
       if (showWildcards && likely.length) {
         lines.push("LIKELY WILDCARD RESULTS — UNCERTAIN", "-----------------------------------");
@@ -1369,14 +1396,19 @@ function pageResponse() {
           const discovery = await discoveryResponse.json();
           if (sequence !== lookupSequence) return;
           if (!discoveryResponse.ok) throw new Error(discovery.error || "Search failed.");
-          await probeWildcards(data, discovery.names.filter(name => name !== data.domain).map(name => name.slice(name.indexOf(".") + 1)), sequence);
-          if (sequence !== lookupSequence) return;
+          // Retain certificate provenance even when the standard scan already
+          // queried this name and no extra certificate DNS tasks are needed.
+          data.certificateNames = discovery.names;
+          data.certificatePatterns = discovery.patterns || [];
+          const certified = new Set(discovery.names);
+          data.checks = data.checks.map(check => certified.has(check.name) ? { ...check, source: "crt.sh" } : check);
 
           const existing = new Set(data.checks.map(check => check.name + "|" + check.type));
           const tasks = discovery.names.flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })))
             .filter(task => !existing.has(task.name + "|" + task.type));
-          data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames discovered." +
-            (discovery.limited ? " Limited to the first 1,000 unique hostnames." : "");
+          data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames and " + data.certificatePatterns.length + " wildcard patterns discovered." +
+            (discovery.limited ? " Limited to the first 1,000 unique certificate names/patterns." : "");
+          renderAudit(data);
           discoveryApi.searchParams.set("mode", "crt-records");
           for (let offset = 0; offset < tasks.length; offset += 40) {
             setStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");

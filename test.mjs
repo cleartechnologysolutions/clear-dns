@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 12/);
+assert.match(html, /Build 13/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -117,8 +117,12 @@ assert.match(report, /gitlab.example.com A/);
 assert.match(report, /A \/ AAAA RECORDS/);
 assert.match(report, /CNAME RECORDS/);
 assert.match(report, /extra.example.com A.*\[crt.sh\]/);
+assert.match(report, /www.example.com A.*\[crt.sh\]/, "Standard-list overlaps retain certificate provenance");
 assert.match(report, /v6.example.com AAAA.*2001:db8::1.*\[crt.sh\]/);
-assert.doesNotMatch(report, /^retired\.example\.com|^mail\.example\.com|NOT FOUND|No records found|MX RECORDS/m);
+assert.doesNotMatch(report, /^mail\.example\.com|NOT FOUND|No records found|MX RECORDS/m);
+assert.match(report, /retired.example.com  \[crt.sh\] No current A\/AAAA\/CNAME answer/);
+assert.match(report, /\*\.example.com  \[crt.sh\] Wildcard certificate pattern/);
+assert.match(report, /\*\.wild.example.com  \[crt.sh\] Wildcard certificate pattern/);
 assert.equal(queries.filter(([name, type]) => name === "www.example.com" && type === "A").length, 1);
 assert.equal(queries.filter(([name]) => name.includes("*") || name.includes("attacker") || name === "outside.test").length, 0);
 assert.equal(queries.filter(([name]) => name.includes("_domainkey")).length, 4);
@@ -188,19 +192,22 @@ const hostChecks = (name, values, source) => ["A", "AAAA", "CNAME"].map(type => 
 }));
 const checks = [
   ...hostChecks("example.com", { A: ["192.0.2.1"] }),
+  ...hostChecks("www.example.com", { A: ["192.0.2.1"] }),
+  ...hostChecks("overlap.example.com", { A: ["192.0.2.1"] }),
   ...hostChecks("fake.example.com", { A: ["192.0.2.2"], AAAA: ["2001:db8::1"], CNAME: ["Parking.Example.Net."] }),
   ...hostChecks("real.example.com", { A: ["192.0.2.55"] }),
   ...hostChecks("alias.example.com", { A: ["192.0.2.1"], CNAME: ["real.vendor.net."] }),
   ...hostChecks("cert.dev.example.com", { A: ["192.0.2.1"] }, "crt.sh"),
   ...hostChecks("unknown.other.example.com", { A: ["192.0.2.1"] }),
   ...hostChecks("mixed.example.com", { A: ["192.0.2.1", "192.0.2.88"] }),
+  ...hostChecks("failedtype.example.com", { A: ["192.0.2.1"] }).map(check => check.type === "AAAA" ? { ...check, status: "SERVFAIL" } : check),
 ];
 const fixture = { domain: "example.com", hostCount: 914, checks, checked: checks.length,
-  found: checks.filter(c => c.answers.length).length, wildcards: profiles };
+  found: checks.filter(c => c.answers.length).length, wildcards: profiles, certificateNames: ["overlap.example.com"] };
 client.render(fixture);
 assert.match(client.report(), /2 likely wildcard names hidden/);
-assert.doesNotMatch(client.report(), /^fake\.example\.com|^cert\.dev\.example\.com/m);
-for (const name of ["example.com", "real.example.com", "alias.example.com", "unknown.other.example.com", "mixed.example.com"]) {
+assert.doesNotMatch(client.report(), /^fake\.example\.com|^failedtype\.example\.com/m);
+for (const name of ["example.com", "www.example.com", "overlap.example.com", "cert.dev.example.com", "real.example.com", "alias.example.com", "unknown.other.example.com", "mixed.example.com"]) {
   assert.ok(client.report().includes(name + " A"), name + " should remain visible");
 }
 const callsBeforeToggle = queries.length + probeQueries.length;
@@ -212,12 +219,36 @@ assert.equal(queries.length + probeQueries.length, callsBeforeToggle, "Toggle do
 elements.get("results").listeners.change({ target: { id: "show-wildcards", checked: false } });
 assert.doesNotMatch(client.report(), /^fake\.example\.com/m);
 
-// Any failed probe leaves the scope unfiltered, rather than declaring no wildcard.
+// Failed AAAA probes do not invalidate successful A/CNAME probes.
 probeMode = "error";
 const failedProfiles = (await (await worker.fetch(wildcardRequest(["example.com"]))).json()).profiles;
 assert.equal(failedProfiles[0].incomplete, true);
-assert.deepEqual(failedProfiles[0].values, {});
+assert.deepEqual(failedProfiles[0].values.A.sort(), ["192.0.2.1", "192.0.2.2"]);
+assert.equal(failedProfiles[0].values.AAAA, undefined);
 client.render({ ...fixture, wildcards: failedProfiles });
 assert.match(client.report(), /Wildcard detection incomplete/);
 assert.match(client.report(), /fake.example.com A/);
-console.log("PASS: 914-host coverage and batches; certificate discovery; wildcard probes, rotations, IPv6, aliases, nested scopes, failed probes and show/hide interaction; valid results preserved.");
+assert.doesNotMatch(client.report(), /^failedtype\.example\.com/m);
+client.render({ ...fixture, wildcards: [{ scope: "example.com", incomplete: true, values: {} }] });
+assert.match(client.report(), /failedtype.example.com A/);
+
+// Reproduce the reported catchall IP with failed AAAA/CNAME checks.
+const productionChecks = [
+  ...hostChecks("example.com", { A: ["35.193.225.90"] }),
+  ...hostChecks("www.example.com", { A: ["35.193.225.90"] }),
+  ...hostChecks("rest.example.com", { A: ["35.193.225.90"] }).map(check => check.type !== "A" ? { ...check, status: "ERROR" } : check),
+  ...hostChecks("staff.example.com", { A: ["35.193.225.90"], CNAME: ["www.example.com."] }),
+  ...hostChecks("cert.example.com", { A: ["35.193.225.90"] }, "crt.sh"),
+  ...hostChecks("overlap.example.com", { A: ["35.193.225.90"] }),
+];
+client.render({ ...fixture, checks: productionChecks, wildcards: [{ scope: "example.com", incomplete: true, values: { A: ["35.193.225.90"] } }] });
+assert.doesNotMatch(client.report(), /^rest\.example\.com/m);
+for (const name of ["example.com", "www.example.com", "staff.example.com", "cert.example.com", "overlap.example.com"]) assert.ok(client.report().includes(name + " A"));
+client.render({ ...fixture, checks: [
+  ...hostChecks("stale.example.com", {}),
+  ...hostChecks("failed.example.com", {}).map(check => ({ ...check, status: "ERROR" })),
+], certificateNames: ["stale.example.com", "failed.example.com", "pending.example.com"] });
+assert.match(client.report(), /stale.example.com  \[crt.sh\] No current A\/AAAA\/CNAME answer/);
+assert.match(client.report(), /failed.example.com  \[crt.sh\] DNS check incomplete/);
+assert.match(client.report(), /pending.example.com  \[crt.sh\] DNS not yet checked/);
+console.log("PASS: 914-host and crt.sh coverage; root/www/certificate exemptions including overlaps; wildcard filtering despite unrelated DNS errors; distinct aliases retained; nested, IPv6, rotating answers and show/hide checks.");
