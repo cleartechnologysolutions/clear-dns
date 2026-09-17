@@ -2,6 +2,8 @@ import { connect } from "cloudflare:sockets";
 
 const DNS_ENDPOINT = "https://cloudflare-dns.com/dns-query";
 const RDAP_BOOTSTRAP_ENDPOINT = "https://data.iana.org/rdap/dns.json";
+const CRT_ENDPOINT = "https://crt.sh/";
+const MAX_CERTIFICATE_NAMES = 1000;
 
 const DNS_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "CAA"];
 
@@ -18,6 +20,43 @@ const STANDARD_HOSTS = [
   "portal",
   "owa",
   "webmail",
+  "connect",
+  "ftp",
+  "web",
+  "cpanel",
+  "m",
+  "test",
+  "blog",
+  "pop3",
+  "dev",
+  "secure",
+  "api",
+  "admin",
+  "whm",
+  "forum",
+  "app",
+  "shop",
+  "store",
+  "support",
+  "server",
+  "news",
+  "staging",
+  "host",
+  "beta",
+  "crm",
+  "en",
+  "mx1",
+  "sso",
+  "status",
+  "billing",
+  "docs",
+  "chat",
+  "video",
+  "cloud",
+  "sql",
+  "login",
+  "uat",
+  "db",
 ];
 
 const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
@@ -158,45 +197,111 @@ async function safeLookup(name, type) {
   }
 }
 
-async function standardScan(domain) {
-  const rootChecks = DNS_TYPES.map(async (type) => ({
-    name: domain,
-    type,
-    ...(await safeLookup(domain, type)),
+async function runDnsTasks(batch) {
+  const checks = new Array(batch.length);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(6, batch.length) }, async () => {
+    while (next < batch.length) {
+      const index = next++;
+      const task = batch[index];
+      checks[index] = { ...task, ...(await safeLookup(task.name, task.type)) };
+    }
   }));
+  return checks;
+}
 
-  const hostChecks = STANDARD_HOSTS.flatMap((host) => {
-    const name = `${host}.${domain}`;
-    return ["A", "CNAME"].map(async (type) => ({
-      name,
-      type,
-      ...(await safeLookup(name, type)),
-    }));
-  });
+function isDomainHostname(name, domain) {
+  return typeof name === "string" && name.length <= 253 &&
+    (name === domain || name.endsWith("." + domain)) &&
+    name.split(".").every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label));
+}
 
-  const dmarcCheck = async () => ({
-    name: `_dmarc.${domain}`,
-    type: "TXT",
-    ...(await safeLookup(`_dmarc.${domain}`, "TXT")),
-  });
+function certificateNames(rows, domain) {
+  if (!Array.isArray(rows)) throw new Error("crt.sh returned an unexpected response.");
+  const names = new Set();
+  let limited = false;
+  for (const row of rows) {
+    // A wildcard certificate does not identify a concrete host: never guess one.
+    for (const field of [row?.name_value, row?.common_name]) {
+      if (typeof field !== "string") continue;
+      for (const value of field.split(/\r?\n/)) {
+        const name = value.trim().toLowerCase().replace(/\.$/, "");
+        if (!isDomainHostname(name, domain) || names.has(name)) continue;
+        if (names.size >= MAX_CERTIFICATE_NAMES) { limited = true; continue; }
+        names.add(name);
+      }
+    }
+  }
+  return { names: [...names].sort(), limited };
+}
 
-  const dkimChecks = DKIM_SELECTORS.map(async (selector) => {
-    const name = `${selector}._domainkey.${domain}`;
-    return {
-      name,
-      type: "TXT",
-      ...(await safeLookup(name, "TXT")),
-    };
-  });
+async function discoverCertificateNames(domain) {
+  if (!isDomainHostname(domain, domain)) throw new Error("Enter a domain hostname for crt.sh.");
+  const url = new URL(CRT_ENDPOINT);
+  url.searchParams.set("q", "%." + domain);
+  url.searchParams.set("output", "json");
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(url, {
+      headers: { accept: "application/json" },
+      signal: controller.signal,
+      redirect: "error",
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw new Error("crt.sh returned HTTP " + response.status + ".");
+    }
+    // Bound external input before JSON parsing on the Worker.
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let bytes = 0, text = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        bytes += value.byteLength;
+        if (bytes > 8 * 1024 * 1024) {
+          await reader.cancel();
+          throw new Error("crt.sh response is too large for this lookup.");
+        }
+        text += decoder.decode(value, { stream: true });
+      }
+      text += decoder.decode();
+    } finally {
+      reader.releaseLock();
+    }
+    const result = certificateNames(JSON.parse(text), domain);
+    return { domain, ...result, source: "crt.sh" };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("crt.sh timed out. Standard Records are still available.");
+    if (error instanceof SyntaxError) throw new Error("crt.sh did not return valid JSON.");
+    throw error;
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
-  const checks = await Promise.all([...rootChecks, ...hostChecks, dmarcCheck(), ...dkimChecks]);
-  const found = checks.filter((check) => check.answers.length);
-
+async function standardScan(domain, offset = 0) {
+  const tasks = [
+    ...DNS_TYPES.map(type => ({ name: domain, type })),
+    ...STANDARD_HOSTS.flatMap(host => ["A", "CNAME"].map(type => ({ name: `${host}.${domain}`, type }))),
+    { name: `_dmarc.${domain}`, type: "TXT" },
+    ...DKIM_SELECTORS.map(selector => ({ name: `${selector}._domainkey.${domain}`, type: "TXT" })),
+  ];
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset >= tasks.length) {
+    throw new Error("Invalid Standard Records offset.");
+  }
+  // Each browser request stays below the Free plan's 50-subrequest ceiling.
+  const batch = tasks.slice(offset, offset + 40);
+  const checks = await runDnsTasks(batch);
   return {
     domain,
     checked: checks.length,
-    found: found.length,
+    found: checks.filter(check => check.answers.length).length,
     checks,
+    total: tasks.length,
+    nextOffset: offset + batch.length < tasks.length ? offset + batch.length : null,
   };
 }
 
@@ -216,7 +321,7 @@ async function fetchJson(url) {
   const response = await fetch(url, {
     headers: {
       accept: "application/rdap+json, application/json",
-      "user-agent": "ClearDNS/1.0",
+      "user-agent": "DNSTools/1.0",
     },
   });
 
@@ -363,7 +468,7 @@ async function lookupDns(name, type) {
   const response = await fetch(query, {
     headers: {
       accept: "application/dns-json",
-      "user-agent": "ClearDNS/1.0",
+      "user-agent": "DNSTools/1.0",
     },
   });
 
@@ -408,7 +513,27 @@ async function apiResponse(request) {
     }
 
     if (mode === "audit") {
-      return Response.json(await standardScan(domain), { headers: noStoreHeaders("application/json") });
+      const offset = Number(url.searchParams.get("offset") || 0);
+      return Response.json(await standardScan(domain, offset), { headers: noStoreHeaders("application/json") });
+    }
+
+    if (mode === "crt") {
+      return Response.json(await discoverCertificateNames(domain), { headers: noStoreHeaders("application/json") });
+    }
+
+    if (mode === "crt-records") {
+      if (request.method !== "POST") return Response.json({ error: "Use POST." }, { status: 405 });
+      const tasks = (await request.json()).tasks;
+      if (!Array.isArray(tasks) || !tasks.length || tasks.length > 40 ||
+          !tasks.every(task => task && isDomainHostname(task.name, domain) &&
+            ["A", "AAAA", "CNAME"].includes(task.type))) {
+        return Response.json({ error: "Invalid certificate DNS checks." }, { status: 400 });
+      }
+      const unique = [...new Map(tasks.map(task =>
+        [task.name + "|" + task.type, { name: task.name, type: task.type, source: "crt.sh" }]
+      )).values()];
+      const checks = await runDnsTasks(unique);
+      return Response.json({ checks }, { headers: noStoreHeaders("application/json") });
     }
 
     if (mode === "domain") {
@@ -439,7 +564,7 @@ function pageResponse() {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Clear DNS | Clear Technology Solutions</title>
+  <title>DNS Tools</title>
   <meta name="description" content="DNS lookup and mail health checker.">
   <style>
     :root {
@@ -702,10 +827,9 @@ function pageResponse() {
   <main>
     <header>
       <div class="brand">
-        <div class="mark">CTS</div>
         <div>
-          <p class="brand-title">Clear Technology Solutions</p>
-          <p class="brand-subtitle">Clear DNS</p>
+          <p class="brand-title">DNS Tools</p>
+          <p class="brand-subtitle">Build 8</p>
         </div>
       </div>
     </header>
@@ -726,7 +850,7 @@ function pageResponse() {
           </div>
 
           <div class="actions">
-            <button type="button" class="secondary" id="audit">Standard scan</button>
+            <button type="button" class="secondary" id="audit">Standard Records</button>
             <button type="button" class="secondary" id="ports">Common ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="all">All common records</button>
@@ -763,6 +887,7 @@ function pageResponse() {
     const resultTitle = document.getElementById("result-title");
     const results = document.getElementById("results");
     let lastText = "";
+    let lookupSequence = 0;
 
     const params = new URLSearchParams(location.search);
     if (params.get("domain")) {
@@ -808,21 +933,16 @@ function pageResponse() {
     function renderAll(data) {
       resultTitle.textContent = "All common records";
       const lines = [
-        "CLEAR DNS COMMON RECORDS",
+        "DNS COMMON RECORDS",
         "Record types: A, AAAA, CNAME, MX, TXT, NS, SOA, CAA",
         ""
       ];
 
       for (const [type, response] of Object.entries(data)) {
+        const answers = response.Answer || [];
+        if (!answers.length) continue;
         lines.push(type + " RECORDS");
         lines.push("-".repeat(type.length + 8));
-        const answers = response.Answer || [];
-
-        if (!answers.length) {
-          lines.push("No records found (" + (response.StatusText || response.Status) + ")");
-          lines.push("");
-          continue;
-        }
 
         for (const record of answers) {
           const ttl = record.TTL ? ("TTL " + String(record.TTL)).padEnd(10, " ") : "".padEnd(10, " ");
@@ -863,7 +983,7 @@ function pageResponse() {
     }
 
     function renderAudit(data) {
-      resultTitle.textContent = "Standard scan";
+      resultTitle.textContent = "Standard Records";
       const found = data.checks.filter((check) => check.answers.length);
       const byType = {};
       for (const check of found) {
@@ -872,16 +992,20 @@ function pageResponse() {
       }
 
       const lines = [
-        "CLEAR DNS STANDARD SCAN",
+        "DNS STANDARD RECORDS",
         "Domain: " + data.domain,
         "Found:  " + data.found + " of " + data.checked + " checks",
         ""
       ];
+      if (data.crtNote) lines.push(data.crtNote, "");
+      const failures = data.checks.filter(check => !["NOERROR", "NXDOMAIN"].includes(check.status)).length;
+      if (failures) lines.push(failures + " DNS checks could not be completed.", "");
+      if (!found.length) lines.push("No resolved records found.");
 
       function section(title, types) {
+        if (!types.some(type => (byType[type] || []).length)) return;
         lines.push(title);
         lines.push("-".repeat(title.length));
-        let added = false;
 
         for (const type of types) {
           const checks = byType[type] || [];
@@ -889,13 +1013,11 @@ function pageResponse() {
             for (const answer of check.answers) {
               const left = (check.name + " " + check.type).padEnd(48, " ");
               const ttl = answer.ttl ? ("TTL " + String(answer.ttl)).padEnd(10, " ") : "".padEnd(10, " ");
-              lines.push(left + ttl + answer.value);
-              added = true;
+              lines.push(left + ttl + answer.value + (check.source === "crt.sh" ? "  [crt.sh]" : ""));
             }
           }
         }
 
-        if (!added) lines.push("No records found");
         lines.push("");
       }
 
@@ -905,20 +1027,6 @@ function pageResponse() {
       section("TXT / AUTH RECORDS", ["TXT"]);
       section("NS / SOA / CAA RECORDS", ["NS", "SOA", "CAA"]);
 
-      const missingImportant = data.checks
-        .filter((check) => !check.answers.length)
-        .filter((check) => ["www", "mail", "autodiscover", "vpn", "remote", "_dmarc"].some((name) => check.name.startsWith(name + ".") || check.name === "_dmarc." + data.domain));
-
-      lines.push("NOT FOUND, COMMON CHECKS");
-      lines.push("------------------------");
-      if (missingImportant.length) {
-        for (const check of missingImportant) {
-          lines.push((check.name + " " + check.type).padEnd(48, " ") + check.status);
-        }
-      } else {
-        lines.push("No common misses to call out.");
-      }
-
       lastText = lines.join("\\n");
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
@@ -926,7 +1034,7 @@ function pageResponse() {
     function renderPorts(data) {
       resultTitle.textContent = "Common ports";
       const lines = [
-        "CLEAR DNS COMMON PORTS",
+        "DNS COMMON PORTS",
         "Target: " + data.domain,
         "Open:   " + data.open + " of " + data.checked,
         ""
@@ -967,7 +1075,7 @@ function pageResponse() {
     function renderDomainInfo(data) {
       resultTitle.textContent = "Domain info";
       const lines = [
-        "CLEAR DNS DOMAIN INFO",
+        "DNS DOMAIN INFO",
         "Domain:     " + data.domain,
         "Registrar:  " + data.registrar,
         "Registrant: " + data.registrant,
@@ -1021,6 +1129,7 @@ function pageResponse() {
         setStatus("Enter a domain first.");
         return;
       }
+      const sequence = ++lookupSequence;
 
       const url = new URL(location.href);
       url.searchParams.set("domain", domain);
@@ -1035,9 +1144,65 @@ function pageResponse() {
       api.searchParams.set("type", typeInput.value);
 
       const response = await fetch(api);
-      const data = await response.json();
+      let data = await response.json();
+      if (sequence !== lookupSequence) return;
       if (!response.ok) {
         throw new Error(data.error || "Lookup failed.");
+      }
+
+      if (mode === "audit") {
+        while (data.nextOffset !== null && data.nextOffset !== undefined) {
+          setStatus("Checking Standard Records: " + data.checked + " of " + data.total + "...");
+          api.searchParams.set("offset", data.nextOffset);
+          const nextResponse = await fetch(api);
+          const batch = await nextResponse.json();
+          if (sequence !== lookupSequence) return;
+          if (!nextResponse.ok) throw new Error(batch.error || "Lookup failed.");
+          data = {
+            ...batch,
+            checked: data.checked + batch.checked,
+            found: data.found + batch.found,
+            checks: data.checks.concat(batch.checks),
+          };
+        }
+        // Show standard results immediately while the certificate search runs.
+        renderAudit(data);
+        setStatus("Searching crt.sh for additional hostnames...");
+        try {
+          const discoveryApi = new URL("/api/lookup", location.origin);
+          discoveryApi.searchParams.set("name", domain);
+          discoveryApi.searchParams.set("mode", "crt");
+          const discoveryResponse = await fetch(discoveryApi);
+          const discovery = await discoveryResponse.json();
+          if (sequence !== lookupSequence) return;
+          if (!discoveryResponse.ok) throw new Error(discovery.error || "Search failed.");
+
+          const existing = new Set(data.checks.map(check => check.name + "|" + check.type));
+          const tasks = discovery.names.flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })))
+            .filter(task => !existing.has(task.name + "|" + task.type));
+          data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames discovered." +
+            (discovery.limited ? " Limited to the first 1,000 unique hostnames." : "");
+          discoveryApi.searchParams.set("mode", "crt-records");
+          for (let offset = 0; offset < tasks.length; offset += 40) {
+            setStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");
+            const checksResponse = await fetch(discoveryApi, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ tasks: tasks.slice(offset, offset + 40) }),
+            });
+            const batch = await checksResponse.json();
+            if (sequence !== lookupSequence) return;
+            if (!checksResponse.ok) throw new Error(batch.error || "DNS verification failed.");
+            data.checks = data.checks.concat(batch.checks);
+            data.checked += batch.checks.length;
+            data.found += batch.checks.filter(check => check.answers.length).length;
+            renderAudit(data);
+          }
+        } catch (error) {
+          if (sequence !== lookupSequence) return;
+          data.crtNote = "crt.sh discovery incomplete: " + (error.message || "Service unavailable.") +
+            " Showing completed DNS checks.";
+        }
       }
 
       if (mode === "audit") renderAudit(data);
@@ -1047,7 +1212,7 @@ function pageResponse() {
       else if (mode === "mail") renderMail(data);
       else renderSingle(typeInput.value, data);
 
-      setStatus("Done.");
+      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. crt.sh discovery incomplete." : "Done.");
     }
 
     form.addEventListener("submit", async (event) => {
