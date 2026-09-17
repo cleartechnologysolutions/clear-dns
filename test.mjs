@@ -7,7 +7,7 @@ const source = readFileSync(new URL("./worker/index.js", import.meta.url), "utf8
   .replace('import { connect } from "cloudflare:sockets";', "")
   .replace("export default {", "globalThis.worker = {");
 let queries = [], active = 0, peak = 0;
-let crtFailure = false, crtCalls = 0;
+let crtFailure = 0, crtCalls = 0;
 const certificateRows = [
   { name_value: "WWW.example.com\nextra.example.com\nv6.example.com\nretired.example.com", common_name: "extra.example.com" },
   { name_value: "extra.example.com\n*.example.com\n*.wild.example.com\noutside.test\nexample.com.attacker.test\n<img>.example.com" },
@@ -22,7 +22,8 @@ const server = vm.createContext({
       assert.equal(new URL(url).searchParams.get("q"), "%.example.com");
       assert.equal(new URL(url).searchParams.get("output"), "json");
       assert.ok(options.signal);
-      return crtFailure ? new Response("Unavailable", { status: 503 }) : Response.json(certificateRows);
+      assert.equal(options.redirect, "manual", "Use the redirect mode supported by Cloudflare Workers.");
+      return crtFailure ? new Response("Unavailable", { status: crtFailure }) : Response.json(certificateRows);
     }
     const params = new URL(url).searchParams;
     const name = params.get("name"), type = params.get("type");
@@ -43,7 +44,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 8/);
+assert.match(html, /Build 9/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -116,12 +117,16 @@ assert.equal(capped.limited, true);
 assert.throws(() => server.certificateNames({}, "example.com"), /unexpected response/);
 
 // Provider outages must not discard valid standard results or look like no matches.
-crtFailure = true;
+crtFailure = 503;
 await client.run("audit");
 assert.match(client.report(), /connect.example.com A/);
 assert.match(client.report(), /crt.sh discovery incomplete: crt.sh returned HTTP 503/);
 assert.equal(elements.get("status").textContent, "Done. crt.sh discovery incomplete.");
 assert.doesNotMatch(client.report(), /retired.example.com|NOT FOUND/);
+crtFailure = 302;
+const redirected = await worker.fetch(new Request("https://dns.example/api/lookup?name=example.com&mode=crt"));
+assert.equal(redirected.status, 502);
+assert.match((await redirected.json()).error, /crt.sh returned HTTP 302/);
 await client.run("all");
 assert.doesNotMatch(client.report(), /MX RECORDS|No records found/);
 console.log("PASS: requested host coverage; bounded DNS batches; crt.sh parsing, deduplication and domain filtering; live-answer-only report including IPv6; input limits; provider failure preserves standard results.");

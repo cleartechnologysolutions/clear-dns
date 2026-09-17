@@ -246,7 +246,7 @@ async function discoverCertificateNames(domain) {
     const response = await fetch(url, {
       headers: { accept: "application/json" },
       signal: controller.signal,
-      redirect: "error",
+      redirect: "manual",
     });
     if (!response.ok) {
       await response.body?.cancel();
@@ -829,7 +829,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 8</p>
+          <p class="brand-subtitle">Build 9</p>
         </div>
       </div>
     </header>

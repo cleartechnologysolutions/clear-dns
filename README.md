@@ -10,7 +10,10 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
-Build 8 removes company branding from the page and reports.
+Build 9 fixes the crt.sh request to use Cloudflare Workers' supported manual
+redirect mode. Non-success responses, including redirects, are reported
+explicitly while keeping completed DNS results available.
+Company branding is removed from the page and reports.
 Standard Records checks A and CNAME
 for 49 hostnames, including connect, all 45 requested names, and the existing
 autodiscover, autoconfig, and owa entries. Root records, DMARC, and DKIM
@@ -36,6 +39,6 @@ Additional DNS checks run in batches of at most 40, with six at a time.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 8 beneath it.
+The page will read DNS Tools with Build 9 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs
