@@ -1,44 +1,41 @@
-# DNS Tools
+# Clip — Build 10
 
-DNS lookup, Standard Records, common port check, and domain info tool.
+Shared text clipboards with a separate URL for each code.
 
-Deploy command:
+## Changes
 
-```bash
-npx wrangler deploy
-```
+- Removed company branding from the clipboard, admin page, and page title.
+- Removed automatic refresh and the checkbox. Use the Refresh button.
+- Refresh only reads saved data; it never saves, clears, or deletes anything.
+- New saved text replaces an unchanged editor. If you have unsaved edits,
+  your editor stays intact and newer saved text appears in a separate,
+  read-only panel. Copy the parts you want into your draft and press Save.
+- An empty/deleted remote board never blanks an existing local copy on refresh.
+- Drafts are saved per code in this tab's session storage to survive a browser
+  reload. If browser storage is unavailable/full, a warning tells you to keep
+  the tab open until you save. Closing the tab can remove these local drafts.
+- Delayed or failed refreshes cannot replace text for another code.
+- Only the explicit Save and Clear buttons change shared text. The existing
+  password-protected admin page and Delete all button remain available.
 
-No database, R2 bucket, or bindings are required.
+## Update your existing Cloudflare app
 
-Build 10 expands Standard Records to 100 common hostnames, checking A, AAAA
-and CNAME for each. This is a curated practical list, not a measured popularity
-ranking. It covers web, mail, Microsoft enrollment, identity, remote access,
-files, backups, monitoring, development, DNS and support names. All previous
-names remain included. Root records, DMARC, and DKIM selector checks remain.
-Only successful DNS answers of the requested record type are included.
+1. Extract this ZIP and upload its contents into the existing Clip GitHub repository.
+2. Replace matching files and commit. Keep the existing Worker, custom domain,
+   DB binding, and admin password; no database changes are needed.
+3. Keep the existing build command: `chmod +x scripts/*.sh && npm run build`
+4. Keep the deploy command: `npx wrangler deploy`
+5. After deployment, reload each open Clip page once to load the new code.
+   Copy any unsaved text somewhere safe before that first reload from the old app.
+   The new page reads `Shared clipboards · Build 10`.
 
-The 313 standard DNS checks run automatically across eight API requests, at most
-40 DNS queries per request and six concurrent queries. The results are
-combined into the existing text report. Unresolved checks and empty record
-sections are hidden.
+The database settings in vite.config.ts retain the previous package's defaults.
+If you customized those values in your repository, keep your current values.
 
-Standard Records also searches crt.sh certificate history automatically.
-Discovered hostnames are deduplicated and scoped to the entered domain, then
-checked for current A, AAAA and CNAME records. Already-completed checks are
-not repeated. Additional answers are marked [crt.sh] in the same report.
-Wildcard certificates are not expanded into guessed hostnames.
+## Checks
 
-Certificate history is not a complete inventory of DNS records. Old certificate
-names without current DNS answers are hidden. A crt.sh failure leaves standard
-results visible with a short status message. The provider request times out
-after 15 seconds and has an 8 MiB response cap; discovery checks at most 1,000
-unique hostnames, with an explicit note when that hostname limit is reached.
-Additional DNS checks run in batches of at most 40, with six at a time.
-Wildcard DNS can produce answers for arbitrary names; a DNS answer alone is
-not proof that a website or service exists at that name.
+`node --test tests/clip-session.test.mjs` verifies two-user updates, refreshes
+with unsaved edits, browser reload draft recovery, empty remote boards, delayed
+responses, failed reads, code switching, and explicit clearing. Use Node 24.
 
-Upload the ZIP contents to your existing DNS repository and commit.
-Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 10 beneath it.
-
-Run the mocked DNS and browser-script checks with: node test.mjs
+`npm run build` produces the Cloudflare Worker and browser assets.
