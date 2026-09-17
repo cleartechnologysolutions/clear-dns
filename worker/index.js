@@ -380,6 +380,7 @@ async function standardScan(domain, offset = 0) {
     checks,
     total: tasks.length,
     hostCount: STANDARD_HOSTS.length,
+    wildcardScopes: [...new Set([domain, ...STANDARD_HOSTS.filter(host => host.includes(".")).map(host => host.slice(host.indexOf(".") + 1) + "." + domain)])],
     nextOffset: offset + batch.length < tasks.length ? offset + batch.length : null,
   };
 }
@@ -598,6 +599,31 @@ async function apiResponse(request) {
 
     if (mode === "crt") {
       return Response.json(await discoverCertificateNames(domain), { headers: noStoreHeaders("application/json") });
+    }
+
+    if (mode === "wildcard") {
+      if (request.method !== "POST") return Response.json({ error: "Use POST." }, { status: 405 });
+      const scopes = (await request.json()).scopes;
+      if (!Array.isArray(scopes) || !scopes.length || scopes.length > 4 ||
+          !scopes.every(scope => typeof scope === "string" && isDomainHostname(scope, domain) && scope.length <= 210)) {
+        return Response.json({ error: "Invalid wildcard scopes." }, { status: 400 });
+      }
+      const profiles = [];
+      for (const scope of new Set(scopes)) {
+        const tasks = Array.from({ length: 3 }, () => "wcprobe-" + crypto.randomUUID().replaceAll("-", "") + "." + scope)
+          .flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })));
+        const checks = await runDnsTasks(tasks);
+        const values = {};
+        const incomplete = checks.some(check => !["NOERROR", "NXDOMAIN"].includes(check.status));
+        for (const type of ["A", "AAAA", "CNAME"]) {
+          const samples = checks.filter(check => check.type === type);
+          if (!incomplete && samples.every(check => check.status === "NOERROR" && check.answers.length)) {
+            values[type] = [...new Set(samples.flatMap(check => check.answers.map(answer => answer.value.toLowerCase().replace(/\.$/, ""))))];
+          }
+        }
+        profiles.push({ scope, values, incomplete });
+      }
+      return Response.json({ profiles }, { headers: noStoreHeaders("application/json") });
     }
 
     if (mode === "crt-records") {
@@ -908,7 +934,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 11</p>
+          <p class="brand-subtitle">Build 12</p>
         </div>
       </div>
     </header>
@@ -967,6 +993,14 @@ function pageResponse() {
     const results = document.getElementById("results");
     let lastText = "";
     let lookupSequence = 0;
+    let showWildcards = false;
+    let currentAudit = null;
+
+    results.addEventListener("change", event => {
+      if (event.target.id !== "show-wildcards" || !currentAudit) return;
+      showWildcards = event.target.checked;
+      renderAudit(currentAudit);
+    });
 
     const params = new URLSearchParams(location.search);
     if (params.get("domain")) {
@@ -1062,8 +1096,31 @@ function pageResponse() {
     }
 
     function renderAudit(data) {
+      currentAudit = data;
       resultTitle.textContent = "Standard Records";
-      const found = data.checks.filter((check) => check.answers.length);
+      const resolved = data.checks.filter(check => check.answers.length);
+      const names = new Map();
+      for (const check of data.checks) {
+        if (!["A", "AAAA", "CNAME"].includes(check.type)) continue;
+        if (!names.has(check.name)) names.set(check.name, []);
+        names.get(check.name).push(check);
+      }
+      const uncertain = new Set();
+      for (const [name, checks] of names) {
+        if (name === data.domain) continue;
+        const scope = name.slice(name.indexOf(".") + 1);
+        const profile = (data.wildcards || []).find(item => item.scope === scope);
+        // Wait for every type; keep names with a distinct alias/address or an error.
+        if (!profile || profile.incomplete || checks.length !== 3 ||
+            checks.some(check => !["NOERROR", "NXDOMAIN"].includes(check.status))) continue;
+        const positive = checks.filter(check => check.answers.length);
+        if (positive.length && positive.every(check => check.answers.every(answer =>
+            (profile.values[check.type] || []).includes(answer.value.toLowerCase().replace(/\\.$/, ""))))) {
+          uncertain.add(name);
+        }
+      }
+      const found = resolved.filter(check => !uncertain.has(check.name));
+      const likely = resolved.filter(check => uncertain.has(check.name));
       const byType = {};
       for (const check of found) {
         byType[check.type] = byType[check.type] || [];
@@ -1075,12 +1132,23 @@ function pageResponse() {
         "Domain: " + data.domain,
         "Scope:  " + data.hostCount + " service/vendor hostnames + root/mail records + crt.sh discovery",
         "Found:  " + data.found + " of " + data.checked + " checks",
+        "Visible: " + found.length + " resolved checks; " + uncertain.size + " likely wildcard names " + (showWildcards ? "shown separately" : "hidden"),
         ""
       ];
+      const wildcards = data.wildcards || [];
+      const detected = wildcards.filter(item => Object.keys(item.values).length);
+      if (detected.length) {
+        lines.push("WILDCARD DNS DETECTED");
+        for (const item of detected) lines.push("*." + item.scope + ": " + Object.entries(item.values).map(([type, values]) => type + " " + values.join(", ")).join("; "));
+        lines.push("Matching names are uncertain: explicit records can share these answers.", "");
+      } else if (wildcards.some(item => !item.incomplete)) lines.push("No wildcard answers detected in completed probes.", "");
+      if (data.wildcardIncomplete || wildcards.some(item => item.incomplete)) {
+        lines.push("Wildcard detection incomplete. Results in unverified scopes remain visible.", "");
+      }
       if (data.crtNote) lines.push(data.crtNote, "");
       const failures = data.checks.filter(check => !["NOERROR", "NXDOMAIN"].includes(check.status)).length;
       if (failures) lines.push(failures + " DNS checks could not be completed.", "");
-      if (!found.length) lines.push("No resolved records found.");
+      if (!found.length) lines.push(likely.length ? "All resolved names currently shown by this scan are likely wildcard matches." : "No resolved records found.");
 
       function section(title, types) {
         if (!types.some(type => (byType[type] || []).length)) return;
@@ -1107,8 +1175,46 @@ function pageResponse() {
       section("TXT / AUTH RECORDS", ["TXT"]);
       section("NS / SOA / CAA RECORDS", ["NS", "SOA", "CAA"]);
 
+      if (showWildcards && likely.length) {
+        lines.push("LIKELY WILDCARD RESULTS — UNCERTAIN", "-----------------------------------");
+        for (const check of likely) for (const answer of check.answers) {
+          lines.push((check.name + " " + check.type).padEnd(48, " ") +
+            ("TTL " + answer.ttl).padEnd(10, " ") + answer.value +
+            "  [uncertain: wildcard match]" + (check.source === "crt.sh" ? " [crt.sh]" : ""));
+        }
+      }
+
       lastText = lines.join("\\n");
-      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
+      results.innerHTML = (likely.length ? '<label style="display:flex;align-items:center;gap:10px;margin-bottom:12px"><input id="show-wildcards" type="checkbox" style="width:auto"' +
+        (showWildcards ? ' checked' : '') + '>Show likely wildcard results (' + uncertain.size + ' names)</label>' : '') +
+        '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
+    }
+
+    async function probeWildcards(data, scopes, sequence) {
+      data.wildcards = data.wildcards || [];
+      data.wildcardAttempted = data.wildcardAttempted || [];
+      const pending = [...new Set(scopes)].filter(scope => !data.wildcardAttempted.includes(scope));
+      const room = Math.max(0, 100 - data.wildcardAttempted.length);
+      const eligible = pending.filter(scope => scope.length <= 210).slice(0, room);
+      if (eligible.length < pending.length) data.wildcardIncomplete = true;
+      for (let offset = 0; offset < eligible.length; offset += 4) {
+        if (sequence !== lookupSequence) return;
+        const batch = eligible.slice(offset, offset + 4);
+        data.wildcardAttempted.push(...batch);
+        setStatus("Checking wildcard DNS: " + data.wildcardAttempted.length + " scopes...");
+        const api = new URL("/api/lookup", location.origin);
+        api.searchParams.set("name", data.domain);
+        api.searchParams.set("mode", "wildcard");
+        try {
+          const response = await fetch(api, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ scopes: batch }) });
+          if (!response.ok) throw new Error("Wildcard check failed.");
+          const result = await response.json();
+          if (sequence !== lookupSequence) return;
+          data.wildcards.push(...result.profiles);
+        } catch (error) {
+          data.wildcardIncomplete = true;
+        }
+      }
     }
 
     function renderPorts(data) {
@@ -1210,6 +1316,8 @@ function pageResponse() {
         return;
       }
       const sequence = ++lookupSequence;
+      currentAudit = null;
+      showWildcards = false;
 
       const url = new URL(location.href);
       url.searchParams.set("domain", domain);
@@ -1231,6 +1339,8 @@ function pageResponse() {
       }
 
       if (mode === "audit") {
+        await probeWildcards(data, data.wildcardScopes, sequence);
+        if (sequence !== lookupSequence) return;
         renderAudit(data);
         while (data.nextOffset !== null && data.nextOffset !== undefined) {
           setStatus("Checking Standard Records: " + data.checked + " of " + data.total + "...");
@@ -1240,6 +1350,7 @@ function pageResponse() {
           if (sequence !== lookupSequence) return;
           if (!nextResponse.ok) throw new Error(batch.error || "Lookup failed.");
           data = {
+            ...data,
             ...batch,
             checked: data.checked + batch.checked,
             found: data.found + batch.found,
@@ -1258,6 +1369,8 @@ function pageResponse() {
           const discovery = await discoveryResponse.json();
           if (sequence !== lookupSequence) return;
           if (!discoveryResponse.ok) throw new Error(discovery.error || "Search failed.");
+          await probeWildcards(data, discovery.names.filter(name => name !== data.domain).map(name => name.slice(name.indexOf(".") + 1)), sequence);
+          if (sequence !== lookupSequence) return;
 
           const existing = new Set(data.checks.map(check => check.name + "|" + check.type));
           const tasks = discovery.names.flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })))

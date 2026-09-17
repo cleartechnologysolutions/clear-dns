@@ -10,7 +10,7 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
-Build 11 expands Standard Records to 914 unique hostnames, checking A, AAAA
+Build 12 adds wildcard detection to Standard Records, with 914 unique hostnames checking A, AAAA
 and CNAME for each. This is a curated practical list, not a measured popularity
 ranking. It covers mail, development environments, source control and CI,
 identity providers, management consoles, public sites, commerce, help desks,
@@ -18,8 +18,7 @@ departments, collaboration, assets, infrastructure, observability, data services
 and regional names. Vendors include Jira, Confluence, Zendesk, Slack, Salesforce,
 Okta, Workday, Microsoft 365, ServiceNow, ConnectWise, Datadog and many more.
 Salesforce and HR are separate guesses; salesforcehr is also included.
-All previous
-names remain included. Root records, DMARC, and DKIM selector checks remain.
+All previous names remain included. Root records, DMARC, and DKIM selector checks remain.
 Only successful DNS answers of the requested record type are included.
 
 The 2,755 standard DNS checks run automatically across 69 API requests, at most
@@ -43,11 +42,30 @@ results visible with a short status message. The provider request times out
 after 15 seconds and has an 8 MiB response cap; discovery checks at most 1,000
 unique hostnames, with an explicit note when that hostname limit is reached.
 Additional DNS checks run in batches of at most 40, with six at a time.
-Wildcard DNS can produce answers for arbitrary names; a DNS answer alone is
-not proof that a website or service exists at that name.
+Wildcard filtering:
+- Three random hostnames are checked for A, AAAA and CNAME at each relevant
+  parent (including nested parents from the built-in list and crt.sh).
+- A type is considered a wildcard candidate only if all three probes answer.
+  Comparisons ignore TTL, CNAME case and a trailing dot. The observed address
+  pool covers rotations seen during the probes; unseen rotations may stay visible.
+- Names whose positive answers all match the observed pool are hidden by default.
+  The domain apex, distinct addresses/aliases, and names with failed or incomplete
+  checks stay visible. Matching explicit records can be hidden too: this is a
+  heuristic, not proof that a name does not exist.
+- Use "Show likely wildcard results" to inspect uncertain matches in a separate
+  text section. No new queries run when toggling, and Copy uses the visible report.
+- Counts distinguish resolved checks from likely wildcard names. Random probes
+  are excluded from record totals. Probe failures are reported and leave results visible.
+- Each probe request handles at most four parent scopes (36 queries), with at
+  most six concurrent DNS lookups. Up to 100 parent scopes are tested per scan;
+  untested/overlong scopes remain visible with an incomplete-detection notice.
+
+Wildcard semantics depend on existing names and the closest enclosing domain:
+https://www.rfc-editor.org/rfc/rfc4592.html
+A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 11 beneath it.
+The page will read DNS Tools with Build 12 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

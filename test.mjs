@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import vm from "node:vm";
+import { webcrypto } from "node:crypto";
 
 // Exercise the Worker API and its delivered client script with mocked DNS.
 const source = readFileSync(new URL("./worker/index.js", import.meta.url), "utf8")
@@ -8,6 +9,8 @@ const source = readFileSync(new URL("./worker/index.js", import.meta.url), "utf8
   .replace("export default {", "globalThis.worker = {");
 let queries = [], active = 0, peak = 0;
 let crtFailure = 0, crtCalls = 0;
+let probeMode = "none";
+const probeQueries = [];
 const certificateRows = [
   { name_value: "WWW.example.com\nextra.example.com\nv6.example.com\nretired.example.com", common_name: "extra.example.com" },
   { name_value: "extra.example.com\n*.example.com\n*.wild.example.com\noutside.test\nexample.com.attacker.test\n<img>.example.com" },
@@ -15,7 +18,7 @@ const certificateRows = [
   ...Array.from({ length: 15 }, (_, i) => ({ name_value: "cert" + i + ".example.com" })),
 ];
 const server = vm.createContext({
-  URL, Response, Request, AbortController, TextDecoder, setTimeout, clearTimeout,
+  URL, Response, Request, AbortController, TextDecoder, setTimeout, clearTimeout, crypto: webcrypto,
   fetch: async (url, options) => {
     if (new URL(url).hostname === "crt.sh") {
       crtCalls++;
@@ -27,6 +30,15 @@ const server = vm.createContext({
     }
     const params = new URL(url).searchParams;
     const name = params.get("name"), type = params.get("type");
+    if (name.startsWith("wcprobe-")) {
+      probeQueries.push([name, type]);
+      const number = new Set(probeQueries.map(([n]) => n)).size;
+      if (probeMode === "error" && type === "AAAA") return Response.json({ Status: 2 });
+      if (probeMode === "none") return Response.json({ Status: 3 });
+      const code = { A: 1, AAAA: 28, CNAME: 5 }[type];
+      const value = { A: "192.0.2." + (number % 2 + 1), AAAA: "2001:db8::1", CNAME: "PARKING.EXAMPLE.NET." }[type];
+      return Response.json({ Status: 0, Answer: [{ type: code, TTL: number * 60, data: value }] });
+    }
     queries.push([name, type]);
     peak = Math.max(peak, ++active);
     await new Promise(resolve => setTimeout(resolve, 0));
@@ -44,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 11/);
+assert.match(html, /Build 12/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -55,18 +67,18 @@ const client = vm.createContext({
   location: { href: "https://dns.example/", origin: "https://dns.example", search: "" },
   history: { replaceState() {} },
   document: { getElementById(id) {
-    if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", addEventListener() {} });
+    if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", listeners: {}, addEventListener(event, handler) { this.listeners[event] = handler; } });
     return elements.get(id);
   }},
   fetch: async (url, options) => {
     const before = queries.length;
     const response = await worker.fetch(new Request(url, options));
-    batches.push(queries.length - before);
+    if (new URL(url).searchParams.get("mode") !== "wildcard") batches.push(queries.length - before);
     return response;
   },
 });
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1] +
-  "\nglobalThis.run = runLookup; globalThis.report = () => lastText;", client);
+  "\nglobalThis.run = runLookup; globalThis.render = renderAudit; globalThis.report = () => lastText;", client);
 elements.get("domain").value = "example.com";
 elements.get("type").value = "A";
 await client.run("audit");
@@ -88,6 +100,8 @@ assert.deepEqual(batches, [...Array(68).fill(40), 35, 0, 40, 14]);
 assert.ok(peak <= 6);
 assert.equal(queries.length, 2809);
 assert.equal(crtCalls, 1);
+assert.ok(probeQueries.length >= 9);
+assert.match(client.report(), /No wildcard answers detected/);
 assert.equal(elements.get("result-title").textContent, "Standard Records");
 assert.equal(elements.get("status").textContent, "Done.");
 const report = client.report();
@@ -150,4 +164,60 @@ assert.equal(redirected.status, 502);
 assert.match((await redirected.json()).error, /crt.sh returned HTTP 302/);
 await client.run("all");
 assert.doesNotMatch(client.report(), /MX RECORDS|No records found/);
-console.log("PASS: requested host coverage; bounded DNS batches; crt.sh parsing, deduplication and domain filtering; live-answer-only report including IPv6; input limits; provider failure preserves standard results.");
+
+// Three random probes per scope, rotating IPs, IPv6 and CNAME normalization.
+probeQueries.length = 0;
+probeMode = "wildcard";
+const wildcardRequest = scopes => new Request("https://dns.example/api/lookup?name=example.com&mode=wildcard", {
+  method: "POST", body: JSON.stringify({ scopes }),
+});
+const wildcardResponse = await worker.fetch(wildcardRequest(["example.com", "dev.example.com"]));
+assert.equal(wildcardResponse.status, 200);
+const { profiles } = await wildcardResponse.json();
+assert.equal(probeQueries.length, 18);
+assert.equal(new Set(probeQueries.map(([name]) => name)).size, 6);
+assert.deepEqual(profiles[0].values.A.sort(), ["192.0.2.1", "192.0.2.2"]);
+assert.deepEqual(profiles[0].values.CNAME, ["parking.example.net"]);
+assert.deepEqual(profiles[0].values.AAAA, ["2001:db8::1"]);
+assert.equal((await worker.fetch(wildcardRequest(["outside.test"]))).status, 400);
+assert.equal((await worker.fetch(wildcardRequest(Array(5).fill("example.com")))).status, 400);
+assert.equal((await worker.fetch(new Request("https://dns.example/api/lookup?name=example.com&mode=wildcard"))).status, 405);
+
+const hostChecks = (name, values, source) => ["A", "AAAA", "CNAME"].map(type => ({
+  name, type, source, status: "NOERROR", answers: (values[type] || []).map(value => ({ value, ttl: 123 })),
+}));
+const checks = [
+  ...hostChecks("example.com", { A: ["192.0.2.1"] }),
+  ...hostChecks("fake.example.com", { A: ["192.0.2.2"], AAAA: ["2001:db8::1"], CNAME: ["Parking.Example.Net."] }),
+  ...hostChecks("real.example.com", { A: ["192.0.2.55"] }),
+  ...hostChecks("alias.example.com", { A: ["192.0.2.1"], CNAME: ["real.vendor.net."] }),
+  ...hostChecks("cert.dev.example.com", { A: ["192.0.2.1"] }, "crt.sh"),
+  ...hostChecks("unknown.other.example.com", { A: ["192.0.2.1"] }),
+  ...hostChecks("mixed.example.com", { A: ["192.0.2.1", "192.0.2.88"] }),
+];
+const fixture = { domain: "example.com", hostCount: 914, checks, checked: checks.length,
+  found: checks.filter(c => c.answers.length).length, wildcards: profiles };
+client.render(fixture);
+assert.match(client.report(), /2 likely wildcard names hidden/);
+assert.doesNotMatch(client.report(), /^fake\.example\.com|^cert\.dev\.example\.com/m);
+for (const name of ["example.com", "real.example.com", "alias.example.com", "unknown.other.example.com", "mixed.example.com"]) {
+  assert.ok(client.report().includes(name + " A"), name + " should remain visible");
+}
+const callsBeforeToggle = queries.length + probeQueries.length;
+elements.get("results").listeners.change({ target: { id: "show-wildcards", checked: true } });
+assert.match(client.report(), /fake.example.com A.*uncertain: wildcard match/);
+assert.match(client.report(), /cert.dev.example.com A.*\[crt.sh\]/);
+assert.match(elements.get("results").innerHTML, / checked/);
+assert.equal(queries.length + probeQueries.length, callsBeforeToggle, "Toggle does not rerun DNS");
+elements.get("results").listeners.change({ target: { id: "show-wildcards", checked: false } });
+assert.doesNotMatch(client.report(), /^fake\.example\.com/m);
+
+// Any failed probe leaves the scope unfiltered, rather than declaring no wildcard.
+probeMode = "error";
+const failedProfiles = (await (await worker.fetch(wildcardRequest(["example.com"]))).json()).profiles;
+assert.equal(failedProfiles[0].incomplete, true);
+assert.deepEqual(failedProfiles[0].values, {});
+client.render({ ...fixture, wildcards: failedProfiles });
+assert.match(client.report(), /Wildcard detection incomplete/);
+assert.match(client.report(), /fake.example.com A/);
+console.log("PASS: 914-host coverage and batches; certificate discovery; wildcard probes, rotations, IPv6, aliases, nested scopes, failed probes and show/hide interaction; valid results preserved.");
