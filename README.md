@@ -10,16 +10,14 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
-Build 9 fixes the crt.sh request to use Cloudflare Workers' supported manual
-redirect mode. Non-success responses, including redirects, are reported
-explicitly while keeping completed DNS results available.
-Company branding is removed from the page and reports.
-Standard Records checks A and CNAME
-for 49 hostnames, including connect, all 45 requested names, and the existing
-autodiscover, autoconfig, and owa entries. Root records, DMARC, and DKIM
-selector checks remain included.
+Build 10 expands Standard Records to 100 common hostnames, checking A, AAAA
+and CNAME for each. This is a curated practical list, not a measured popularity
+ranking. It covers web, mail, Microsoft enrollment, identity, remote access,
+files, backups, monitoring, development, DNS and support names. All previous
+names remain included. Root records, DMARC, and DKIM selector checks remain.
+Only successful DNS answers of the requested record type are included.
 
-The 111 standard DNS checks run automatically across three API requests, at most
+The 313 standard DNS checks run automatically across eight API requests, at most
 40 DNS queries per request and six concurrent queries. The results are
 combined into the existing text report. Unresolved checks and empty record
 sections are hidden.
@@ -36,9 +34,11 @@ results visible with a short status message. The provider request times out
 after 15 seconds and has an 8 MiB response cap; discovery checks at most 1,000
 unique hostnames, with an explicit note when that hostname limit is reached.
 Additional DNS checks run in batches of at most 40, with six at a time.
+Wildcard DNS can produce answers for arbitrary names; a DNS answer alone is
+not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 9 beneath it.
+The page will read DNS Tools with Build 10 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

@@ -57,6 +57,57 @@ const STANDARD_HOSTS = [
   "login",
   "uat",
   "db",
+  "www1",
+  "www2",
+  "exchange",
+  "enterpriseenrollment",
+  "enterpriseregistration",
+  "mail1",
+  "mail2",
+  "mx",
+  "mx2",
+  "mx3",
+  "smtp1",
+  "smtp2",
+  "ns",
+  "ns1",
+  "ns2",
+  "ns3",
+  "dns",
+  "dns1",
+  "dns2",
+  "intranet",
+  "extranet",
+  "internal",
+  "adfs",
+  "sts",
+  "auth",
+  "accounts",
+  "id",
+  "identity",
+  "rdp",
+  "rdweb",
+  "rdgateway",
+  "rdsgateway",
+  "terminal",
+  "citrix",
+  "gateway",
+  "firewall",
+  "fw",
+  "files",
+  "file",
+  "download",
+  "downloads",
+  "sftp",
+  "backup",
+  "nas",
+  "monitor",
+  "monitoring",
+  "grafana",
+  "jenkins",
+  "git",
+  "gitlab",
+  "helpdesk",
 ];
 
 const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
@@ -174,8 +225,11 @@ function summarizeMail(domain, results) {
   };
 }
 
-function answerValues(response) {
-  return (response.Answer || []).map((record) => ({
+function answerValues(response, type) {
+  if (response.Status !== 0) return [];
+  // Resolver responses may contain both aliases and addresses. Keep the
+  // requested type so a CNAME-only answer is not displayed as an A/AAAA record.
+  return (response.Answer || []).filter(record => record.type === TYPE_CODES[type]).map((record) => ({
     ttl: record.TTL || 0,
     value: record.data || "",
   }));
@@ -186,7 +240,7 @@ async function safeLookup(name, type) {
     const response = await lookupDns(name, type);
     return {
       status: response.StatusText,
-      answers: answerValues(response),
+      answers: answerValues(response, type),
     };
   } catch (error) {
     return {
@@ -285,7 +339,7 @@ async function discoverCertificateNames(domain) {
 async function standardScan(domain, offset = 0) {
   const tasks = [
     ...DNS_TYPES.map(type => ({ name: domain, type })),
-    ...STANDARD_HOSTS.flatMap(host => ["A", "CNAME"].map(type => ({ name: `${host}.${domain}`, type }))),
+    ...STANDARD_HOSTS.flatMap(host => ["A", "AAAA", "CNAME"].map(type => ({ name: `${host}.${domain}`, type }))),
     { name: `_dmarc.${domain}`, type: "TXT" },
     ...DKIM_SELECTORS.map(selector => ({ name: `${selector}._domainkey.${domain}`, type: "TXT" })),
   ];
@@ -829,7 +883,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 9</p>
+          <p class="brand-subtitle">Build 10</p>
         </div>
       </div>
     </header>
@@ -994,6 +1048,7 @@ function pageResponse() {
       const lines = [
         "DNS STANDARD RECORDS",
         "Domain: " + data.domain,
+        "Scope:  100 common hostnames + root/mail records + crt.sh discovery",
         "Found:  " + data.found + " of " + data.checked + " checks",
         ""
       ];

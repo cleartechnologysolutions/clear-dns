@@ -44,7 +44,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 9/);
+assert.match(html, /Build 10/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -72,22 +72,29 @@ elements.get("type").value = "A";
 await client.run("audit");
 
 const requested = "www mail ftp webmail smtp pop web cpanel m imap test blog pop3 dev secure api admin whm forum remote vpn app shop store support portal server news staging host beta crm en mx1 sso status billing docs chat video cloud sql login uat db connect".split(" ");
-for (const host of [...requested, "autodiscover", "autoconfig", "owa"]) {
-  for (const type of ["A", "CNAME"]) {
+const hosts = vm.runInContext("STANDARD_HOSTS", server);
+assert.equal(hosts.length, 100);
+assert.equal(new Set(hosts).size, 100);
+for (const name of [...requested, "autodiscover", "autoconfig", "owa"]) assert.ok(hosts.includes(name));
+for (const host of hosts) {
+  for (const type of ["A", "AAAA", "CNAME"]) {
     assert.equal(queries.filter(([name, t]) => name === host + ".example.com" && t === type).length, 1, host + " " + type);
   }
 }
-assert.deepEqual(batches, [40, 40, 31, 0, 40, 15]);
+assert.deepEqual(batches, [40, 40, 40, 40, 40, 40, 40, 33, 0, 40, 14]);
 assert.ok(peak <= 6);
-assert.equal(queries.length, 166);
+assert.equal(queries.length, 367);
 assert.equal(crtCalls, 1);
 assert.equal(elements.get("result-title").textContent, "Standard Records");
 assert.equal(elements.get("status").textContent, "Done.");
 const report = client.report();
-assert.match(report, /Found:  130 of 166 checks/);
+assert.match(report, /Found:  232 of 367 checks/);
 assert.match(report, /connect.example.com A/);
 assert.match(report, /connect.example.com CNAME/);
 assert.match(report, /db.example.com CNAME/);
+assert.match(report, /enterpriseenrollment.example.com CNAME/);
+assert.match(report, /rdgateway.example.com A/);
+assert.match(report, /gitlab.example.com A/);
 assert.match(report, /A \/ AAAA RECORDS/);
 assert.match(report, /CNAME RECORDS/);
 assert.match(report, /extra.example.com A.*\[crt.sh\]/);
@@ -97,6 +104,15 @@ assert.equal(queries.filter(([name, type]) => name === "www.example.com" && type
 assert.equal(queries.filter(([name]) => name.includes("*") || name.includes("attacker") || name === "outside.test").length, 0);
 assert.equal(queries.filter(([name]) => name.includes("_domainkey")).length, 4);
 assert.equal(queries.filter(([name]) => name === "_dmarc.example.com").length, 1);
+const mixedAnswers = { Status: 0, Answer: [
+  { type: 5, TTL: 300, data: "target.example.net." },
+  { type: 1, TTL: 300, data: "192.0.2.55" },
+] };
+assert.equal(server.answerValues(mixedAnswers, "A").length, 1);
+assert.equal(server.answerValues(mixedAnswers, "A")[0].value, "192.0.2.55");
+assert.equal(server.answerValues(mixedAnswers, "CNAME")[0].value, "target.example.net.");
+assert.equal(server.answerValues(mixedAnswers, "AAAA").length, 0);
+assert.equal(server.answerValues({ ...mixedAnswers, Status: 3 }, "A").length, 0);
 const before = queries.length;
 const invalid = await worker.fetch(new Request("https://dns.example/api/lookup?name=example.com&mode=audit&offset=-1"));
 assert.equal(invalid.status, 502);
