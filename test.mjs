@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 15/);
+assert.match(html, /Build 16/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -294,3 +294,41 @@ server.connect=()=>({opened:Promise.reject(Error('restricted')),closed:Promise.r
 const blocked=await server.checkWebPort('www.example.com',80,'8.8.8.8');assert.equal(blocked.status,'UNCONFIRMED');assert.equal(closed,2);
 for(const ip of ['127.0.0.1','10.0.0.1','169.254.169.254','100.64.0.1','::1','::ffff:127.0.0.1','fc00::1'])assert.equal(server.publicWebAddress(ip),false);
 console.log('PASS: cached discovered-host web checks, prior-scan/domain gate, clickable links, HTTP errors count as open, TCP fallback/cleanup, unconfirmed failures, nested RDAP contacts and redaction.');
+
+// Subdomain mail work reuses the completed scan, preserves primary output,
+// queries only MX/TXT/direct DMARC, and keeps failed checks visible.
+const mailQueries=[];
+server.fetch=async url=>{
+ const q=new URL(url).searchParams,name=q.get('name'),type=q.get('type');mailQueries.push([name,type]);
+ if(name==='broken.example.com')return Response.json({Status:2});
+ const answer=name==='jira.example.com'&&type==='MX'?[{type:15,TTL:300,data:'10 mx.vendor.test.'}]:
+  name==='jira.example.com'&&type==='TXT'?[{type:16,TTL:60,data:'"v=spf1 -all"'},{type:16,TTL:60,data:'"verification=abc"'}]:[];
+ return Response.json({Status:0,Answer:answer});
+};
+const mailRequest=hosts=>new Request('https://dns.example/api/lookup?name=example.com&mode=mail-subdomains',{method:'POST',body:JSON.stringify({hosts})});
+assert.equal((await worker.fetch(mailRequest(['outside.test']))).status,400);
+assert.equal((await worker.fetch(mailRequest(['example.com']))).status,400);
+assert.equal((await worker.fetch(mailRequest(Array(13).fill('jira.example.com')))).status,400);
+const response=await worker.fetch(mailRequest(['jira.example.com','jira.example.com','empty.example.com','broken.example.com']));
+assert.equal(response.status,200);const mailBatch=await response.json();assert.equal(mailBatch.checks.length,9);assert.equal(mailQueries.length,9);
+assert.deepEqual(mailQueries.filter(([n])=>n==='jira.example.com').map(([,t])=>t).sort(),['MX','TXT']);
+assert.ok(mailQueries.some(([n,t])=>n==='_dmarc.jira.example.com'&&t==='TXT'));
+client.mailData={domain:'example.com',mx:'Primary MX',spf:'Primary SPF',dmarc:'Primary DMARC',warnings:[],records:{mx:['10 primary.example.com.'],spf:['v=spf1 -all'],txt:[],dmarc:[]}};
+vm.runInContext('savedAudit=null;renderMail(mailData)',client);
+assert.match(client.report(),/Complete Standard Records/);
+const called=[];
+client.fetch=async(url,options)=>{
+ assert.equal(new URL(url).searchParams.get('mode'),'mail-subdomains');called.push(...JSON.parse(options.body).hosts);return Response.json(mailBatch);
+};
+vm.runInContext('savedAudit={domain:"example.com",hosts:["example.com","jira.example.com","empty.example.com","broken.example.com"]}',client);
+await vm.runInContext('extendMailCheck(mailData,lookupSequence)',client);
+assert.deepEqual(called,['jira.example.com','empty.example.com','broken.example.com']);
+const mailReport=client.report();
+assert.ok(mailReport.indexOf('PRIMARY DOMAIN')<mailReport.indexOf('SUBDOMAIN MAIL RECORDS'));
+assert.match(mailReport,/Complete: 3 of 3/);assert.match(mailReport,/SPF TXT/);assert.match(mailReport,/verification=abc/);assert.match(mailReport,/INCOMPLETE CHECKS/);assert.match(mailReport,/broken.example.com MX: SERVFAIL/);
+assert.doesNotMatch(mailReport,/empty.example.com/);assert.match(mailReport,/Inheritance is not evaluated/);
+const callsBefore=called.length;
+vm.runInContext('savedAudit={domain:"other.example",hosts:["mail.other.example"]}',client);
+await vm.runInContext('extendMailCheck({...mailData,subdomains:undefined},lookupSequence)',client);
+assert.equal(called.length,callsBefore);
+console.log('PASS: discovered-only subdomain mail scope, bounded/deduplicated batches, primary-first report, SPF/TXT/MX, direct DMARC, hidden empty results, visible failures, and scan/domain gate.');

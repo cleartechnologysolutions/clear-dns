@@ -1,5 +1,29 @@
 # DNS Tools
 
+## Build 16 — subdomain mail records
+
+Mail check always shows the primary domain MX/SPF/TXT/DMARC information first.
+After Standard Records completes for the same domain, Mail check also reuses its
+retained discovered hostnames (excluding root) and queries MX, TXT and direct
+_dmarc TXT records. The subdomain section is appended after the primary results
+and updates with progress. SPF TXT records are labeled. Empty subdomain results
+are hidden, while failed DNS checks remain visible as incomplete.
+
+Without a completed scan, a visible instruction says to finish Standard Records
+and click Mail check again. This does not repeat discovery, crt.sh, wildcard
+probes or A/AAAA/CNAME checks. Each request includes at most 12 hostnames / 36
+queries, with six queries at once. Root/www/crt.sh wildcard exemptions remain
+unchanged; hidden wildcard guesses and certificate-only history are excluded.
+
+Direct DMARC absence is not labeled missing protection for subdomains: an
+organizational-domain policy may apply. Policy inheritance is not evaluated.
+The extended scan runs when Mail check is clicked after Standard Records; it
+does not start automatically just because Standard Records finishes.
+
+Regression tests cover domain gating, exact query types, deduplication, primary
+results before subdomains, SPF labels, hidden empty results and visible failures.
+No deployment changes or new services are required.
+
 DNS lookup, Standard Records, discovered-host web port check, and domain info tool.
 
 Deploy command:

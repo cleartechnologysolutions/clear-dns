@@ -220,6 +220,7 @@ function summarizeMail(domain, results) {
     records: {
       mx: mx.map((record) => record.data),
       spf,
+      txt,
       dmarc: dmarc ? [dmarc] : [],
     },
   };
@@ -581,6 +582,17 @@ async function apiResponse(request) {
       );
     }
 
+    if (mode === "mail-subdomains") {
+      if(request.method!=="POST")return Response.json({error:"Use POST with discovered subdomains."},{status:405});
+      const raw=await request.text();if(raw.length>4096)return Response.json({error:"Batch too large."},{status:400});
+      let hosts;try{hosts=JSON.parse(raw).hosts;}catch{return Response.json({error:"Invalid JSON."},{status:400});}
+      if(!Array.isArray(hosts)||!hosts.length||hosts.length>12||!hosts.every(host=>host!==domain&&isDomainHostname(host,domain)))return Response.json({error:"Invalid discovered subdomains."},{status:400});
+      const tasks=[...new Set(hosts)].flatMap(host=>[
+        {name:host,type:"MX",host},{name:host,type:"TXT",host},{name:"_dmarc."+host,type:"TXT",host}
+      ]);
+      return Response.json({checks:await runDnsTasks(tasks)},{headers:noStoreHeaders("application/json")});
+    }
+
     if (mode === "audit") {
       const offset = Number(url.searchParams.get("offset") || 0);
       return Response.json(await standardScan(domain, offset), { headers: noStoreHeaders("application/json") });
@@ -935,7 +947,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 15</p>
+          <p class="brand-subtitle">Build 16</p>
         </div>
       </div>
     </header>
@@ -1084,21 +1096,60 @@ function pageResponse() {
     }
 
     function renderMail(data) {
-      resultTitle.textContent = "Mail check";
-      const warnings = data.warnings.length
-        ? data.warnings.map((warning) => '<div class="pill warning"><strong>' + escapeText(warning) + '</strong></div>').join("")
-        : '<div class="pill"><strong>No obvious mail DNS warnings.</strong><span>Still worth checking the exact records when troubleshooting.</span></div>';
+      resultTitle.textContent="Mail check";
+      const lines=["MAIL CHECK", "PRIMARY DOMAIN: "+data.domain, "", data.mx, data.spf, data.dmarc, ""];
+      for(const warning of data.warnings)lines.push("NOTE: "+warning);
+      for(const [title,records] of [["MX",data.records.mx],["SPF",data.records.spf],["TXT",data.records.txt||[]],["DMARC",data.records.dmarc]]){
+        if(!records.length)continue;
+        lines.push("",title+" RECORDS","-".repeat(title.length+8),...records);
+      }
+      lines.push("", "SUBDOMAIN MAIL RECORDS", "----------------------");
+      const sub=data.subdomains;
+      if(!sub){lines.push("Complete Standard Records to include subdomain mail records. Then click Mail check again.");}
+      else {
+        lines.push((sub.complete?"Complete: ":"Scanning — partial results: ")+sub.checked+" of "+sub.total+" discovered subdomains checked.","");
+        const hosts=[...new Set(sub.checks.map(c=>c.host))];
+        let found=0;
+        for(const host of hosts){
+          const checks=sub.checks.filter(c=>c.host===host),positive=checks.filter(c=>c.answers.length);
+          if(!positive.length)continue;
+          found++;lines.push(host,"-".repeat(host.length));
+          for(const c of positive)for(const answer of c.answers){
+            const label=c.name.startsWith("_dmarc.")?"DMARC TXT":c.type==="TXT"&&answer.value.replaceAll('"', '').trim().toLowerCase().startsWith("v=spf1")?"SPF TXT":c.type;
+            lines.push(c.name+"  "+label+"  TTL "+answer.ttl+"  "+answer.value);
+          }
+          lines.push("");
+        }
+        if(!found)lines.push(sub.complete?"No subdomain MX/TXT/DMARC answers found in completed checks.":"No matching records found yet.");
+        const errors=sub.checks.filter(c=>!["NOERROR","NXDOMAIN"].includes(c.status));
+        if(errors.length){lines.push("", "INCOMPLETE CHECKS");for(const c of errors)lines.push(c.name+" "+c.type+": "+c.status);}
+        lines.push("", "Only discovered subdomains are checked; the Standard Records discovery scan is not repeated.","No direct DMARC record does not necessarily mean no policy: an organizational-domain policy may apply. Inheritance is not evaluated here.");
+      }
+      lastText=lines.join("\\n");
+      results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
+    }
 
-      results.innerHTML =
-        '<div class="summary">' +
-        '<div class="pill"><strong>' + escapeText(data.mx) + '</strong><span>MX</span></div>' +
-        '<div class="pill"><strong>' + escapeText(data.spf) + '</strong><span>SPF</span></div>' +
-        '<div class="pill"><strong>' + escapeText(data.dmarc) + '</strong><span>DMARC</span></div>' +
-        warnings +
-        '<article class="record"><div class="record-top"><span>Records</span><span>Mail DNS</span></div><pre class="record-data">' + escapeText(JSON.stringify(data.records, null, 2)) + '</pre></article>' +
-        '</div>';
-
-      lastText = JSON.stringify(data, null, 2);
+    async function extendMailCheck(data,sequence){
+      if(!savedAudit||savedAudit.domain!==data.domain){renderMail(data);return;}
+      const hosts=[...new Set(savedAudit.hosts)].filter(host=>host!==data.domain);
+      data.subdomains={total:hosts.length,checked:0,checks:[],complete:false};
+      renderMail(data);
+      for(let i=0;i<hosts.length;i+=12){
+        if(sequence!==lookupSequence)return;
+        const batch=hosts.slice(i,i+12);
+        setStatus("Primary domain complete. Checking subdomain mail records: "+i+" of "+hosts.length+"...");
+        const api=new URL("/api/lookup",location.origin);api.searchParams.set("mode","mail-subdomains");api.searchParams.set("name",data.domain);
+        try {
+          const response=await fetch(api,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hosts:batch})});
+          const result=await response.json();if(!response.ok)throw Error(result.error||"Subdomain mail lookup failed");
+          data.subdomains.checks.push(...result.checks);
+        }catch{
+          data.subdomains.checks.push(...batch.flatMap(host=>[{host,name:host,type:"MX",status:"ERROR",answers:[]},{host,name:host,type:"TXT",status:"ERROR",answers:[]},{host,name:"_dmarc."+host,type:"TXT",status:"ERROR",answers:[]}]));
+        }
+        if(sequence!==lookupSequence)return;
+        data.subdomains.checked+=batch.length;renderMail(data);
+      }
+      data.subdomains.complete=true;renderMail(data);
     }
 
     function formatAnswers(answers) {
@@ -1454,7 +1505,7 @@ function pageResponse() {
       if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice()};updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
-      else if (mode === "mail") renderMail(data);
+      else if (mode === "mail") {await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;}
       else renderSingle(typeInput.value, data);
 
       setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. crt.sh discovery incomplete." : "Done.");
