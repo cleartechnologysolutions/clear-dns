@@ -136,30 +136,6 @@ const STANDARD_HOSTS = [...new Set([
 
 const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
 
-const COMMON_PORTS = [
-  [20, "FTP data"],
-  [21, "FTP"],
-  [22, "SSH"],
-  [23, "Telnet"],
-  [25, "SMTP, blocked by Cloudflare"],
-  [53, "DNS"],
-  [80, "HTTP"],
-  [110, "POP3"],
-  [143, "IMAP"],
-  [443, "HTTPS"],
-  [465, "SMTPS"],
-  [587, "SMTP submit"],
-  [993, "IMAPS"],
-  [995, "POP3S"],
-  [1433, "SQL Server"],
-  [3306, "MySQL"],
-  [3389, "RDP"],
-  [5432, "PostgreSQL"],
-  [5900, "VNC"],
-  [8080, "HTTP alt"],
-  [8443, "HTTPS alt"],
-];
-
 const TYPE_CODES = {
   A: 1,
   NS: 2,
@@ -456,6 +432,20 @@ async function rdapLookup(domain) {
   return { error: errors.join("; ") || "RDAP lookup failed." };
 }
 
+function rdapContacts(entities, depth=0, parent="") {
+  if(depth>5||!Array.isArray(entities))return [];
+  const text=v=>Array.isArray(v)?v.map(text).filter(Boolean).join(", "):typeof v==="string"?v:"";
+  return entities.slice(0,100).flatMap(entity=>{
+    const properties=Array.isArray(entity.vcardArray?.[1])?entity.vcardArray[1]:[];
+    const values=name=>properties.filter(p=>p[0]===name).map(p=>name==="adr"?(p[1]?.label||text(p[3])):text(p[3])).filter(Boolean);
+    const name=values("fn").join("; "),organization=values("org").join("; ");
+    return [{roles:entity.roles||[],handle:entity.handle||"",parent,name,organization,
+      email:values("email"),phone:values("tel"),address:values("adr"),url:values("url"),
+      remarks:(entity.remarks||[]).flatMap(r=>r.description||[]).filter(v=>typeof v==="string")},
+      ...rdapContacts(entity.entities,depth+1,name||organization||entity.handle||parent)];
+  }).slice(0,100);
+}
+
 async function domainInfo(domain) {
   const [rdapResult, ds, dnskey, ns] = await Promise.all([
     rdapLookup(domain),
@@ -488,63 +478,55 @@ async function domainInfo(domain) {
     ds: dsValues,
     dnskeyCount: dnskeyValues.length,
     rdapError: rdapResult.error || "",
+    contacts: rdapContacts(rdapResult.entities),
   };
 }
 
-function isPrivateTarget(domain) {
-  return (
-    domain === "localhost" ||
-    domain.endsWith(".local") ||
-    /^10\./.test(domain) ||
-    /^127\./.test(domain) ||
-    /^169\.254\./.test(domain) ||
-    /^172\.(1[6-9]|2\d|3[0-1])\./.test(domain) ||
-    /^192\.168\./.test(domain)
-  );
+function publicWebAddress(ip) {
+  if (ip.includes(":")) return /^[23][0-9a-f]{3}:/i.test(ip) && !/^2001:(db8|0):/i.test(ip);
+  const p=ip.split(".").map(Number);
+  return p.length===4 && p.every(n=>Number.isInteger(n)&&n>=0&&n<=255) &&
+    ![0,10,127].includes(p[0]) && p[0]<224 &&
+    !(p[0]===169&&p[1]===254) && !(p[0]===172&&p[1]>=16&&p[1]<=31) &&
+    !(p[0]===192&&(p[1]===168||p[1]===0)) && !(p[0]===100&&p[1]>=64&&p[1]<=127) &&
+    !(p[0]===198&&(p[1]===18||p[1]===19));
 }
 
-async function checkPort(hostname, port, label) {
-  if (port === 25) {
-    return { port, label, status: "SKIPPED", detail: "Cloudflare Workers block outbound TCP 25.", ms: 0 };
-  }
-
-  const started = Date.now();
-  let timeoutId;
-
+async function checkWebPort(hostname, port, address) {
+  const url=(port===443?"https://":"http://")+hostname+"/";
+  const started=Date.now();
+  const controller=new AbortController();
+  const deadline=setTimeout(()=>controller.abort(),4500);
   try {
-    const timeout = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error("Timed out")), 2800);
-    });
-    const socket = connect({ hostname, port });
-    await Promise.race([socket.opened, timeout]);
-    socket.close();
-    clearTimeout(timeoutId);
-    return { port, label, status: "OPEN", detail: "TCP connect succeeded", ms: Date.now() - started };
-  } catch (error) {
-    clearTimeout(timeoutId);
-    return { port, label, status: "CLOSED", detail: error.message || "TCP connect failed", ms: Date.now() - started };
-  }
+    const response=await fetch(url,{method:"HEAD",redirect:"manual",signal:controller.signal});
+    await response.body?.cancel();
+    return {hostname,port,url,status:"OPEN",detail:"HTTP "+response.status,ms:Date.now()-started};
+  } catch {} finally {clearTimeout(deadline);}
+  // An invalid certificate or non-HTTP service can still have an open TCP port.
+  let socket,timer;
+  try {
+    socket=connect({hostname:address,port});
+    socket.closed.catch(()=>{});
+    await Promise.race([socket.opened,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error("Timeout")),2500);})]);
+    return {hostname,port,url,status:"OPEN",detail:"TCP connected; web response/TLS not verified",ms:Date.now()-started};
+  } catch {return {hostname,port,status:"UNCONFIRMED",detail:"No response, filtered, or restricted from Cloudflare"};}
+  finally {clearTimeout(timer);if(socket)await socket.close().catch(()=>{});}
 }
-
-async function commonPortScan(domain) {
-  if (isPrivateTarget(domain)) {
-    throw new Error("Private and localhost targets are not supported from Cloudflare.");
-  }
-
-  const results = [];
-  const batchSize = 5;
-
-  for (let index = 0; index < COMMON_PORTS.length; index += batchSize) {
-    const batch = COMMON_PORTS.slice(index, index + batchSize);
-    results.push(...(await Promise.all(batch.map(([port, label]) => checkPort(domain, port, label)))));
-  }
-
-  return {
-    domain,
-    checked: results.length,
-    open: results.filter((result) => result.status === "OPEN").length,
-    results,
-  };
+async function checkWebHost(hostname) {
+  // Safety lookup only for the selected discovered host, never the guess list.
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),5000);
+  try {
+    const answers=await Promise.all(["A","AAAA"].map(async type=>{
+      const r=await fetch(DNS_ENDPOINT+"?name="+encodeURIComponent(hostname)+"&type="+type,{headers:{accept:"application/dns-json"},signal:controller.signal});
+      if(!r.ok)throw Error("DNS safety check failed");
+      const data=await r.json();if(![0,3].includes(data.Status))throw Error("DNS safety check failed");
+      return (data.Answer||[]).filter(a=>[1,28].includes(a.type)).map(a=>a.data);
+    }));
+    const ips=answers.flat();
+    if(!ips.length||ips.some(ip=>!publicWebAddress(ip)))throw Error("No public-only address available");
+    return await Promise.all([80,443].map(port=>checkWebPort(hostname,port,ips[0])));
+  } catch {return [80,443].map(port=>({hostname,port,status:"UNCONFIRMED",detail:"DNS unavailable or private/special address"}));}
+  finally {clearTimeout(timer);}
 }
 
 async function lookupDns(name, type) {
@@ -653,9 +635,18 @@ async function apiResponse(request) {
       return Response.json(await domainInfo(domain), { headers: noStoreHeaders("application/json") });
     }
 
-    if (mode === "ports") {
-      return Response.json(await commonPortScan(domain), { headers: noStoreHeaders("application/json") });
+    if (mode === "web") {
+      if(request.method!=="POST")return Response.json({error:"Run Standard Records first."},{status:405});
+      const raw=await request.text();if(raw.length>4096)return Response.json({error:"Batch too large."},{status:400});
+      const hosts=JSON.parse(raw).hosts;
+      if(!Array.isArray(hosts)||!hosts.length||hosts.length>4||!hosts.every(host=>isDomainHostname(host,domain)))return Response.json({error:"Invalid discovered hostnames."},{status:400});
+      const results=[];
+      // Two hosts / four connections at a time; small requests fit Worker limits.
+      const unique=[...new Set(hosts)];
+      for(let i=0;i<unique.length;i+=2)results.push(...(await Promise.all(unique.slice(i,i+2).map(checkWebHost))).flat());
+      return Response.json({domain,results},{headers:noStoreHeaders("application/json")});
     }
+    if(mode==="ports")return Response.json({error:"Common ports was replaced by Check web ports after Standard Records."},{status:410});
 
     return Response.json(await lookupDns(domain, type), { headers: noStoreHeaders("application/json") });
   } catch (error) {
@@ -942,7 +933,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 13</p>
+          <p class="brand-subtitle">Build 14</p>
         </div>
       </div>
     </header>
@@ -964,7 +955,7 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
-            <button type="button" class="secondary" id="ports">Common ports</button>
+            <button type="button" class="secondary" id="ports" disabled title="Run Standard Records first">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="all">All common records</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
@@ -1003,6 +994,9 @@ function pageResponse() {
     let lookupSequence = 0;
     let showWildcards = false;
     let currentAudit = null;
+    let savedAudit = null, discoveredWebHosts = [], webBusy = false;
+    function updateWebButton(){portsButton.disabled=webBusy||!savedAudit||cleanDomain(domainInput.value).toLowerCase()!==savedAudit.domain; }
+    domainInput.addEventListener("input",updateWebButton);
 
     results.addEventListener("change", event => {
       if (event.target.id !== "show-wildcards" || !currentAudit) return;
@@ -1130,6 +1124,7 @@ function pageResponse() {
         }
       }
       const found = resolved.filter(check => !uncertain.has(check.name));
+      discoveredWebHosts=[...new Set(found.filter(c=>["A","AAAA","CNAME"].includes(c.type)&&!c.name.includes("*")&&!c.name.includes("_")).map(c=>c.name))].sort();
       const likely = resolved.filter(check => uncertain.has(check.name));
       const byType = {};
       for (const check of found) {
@@ -1244,45 +1239,42 @@ function pageResponse() {
       }
     }
 
-    function renderPorts(data) {
-      resultTitle.textContent = "Common ports";
-      const lines = [
-        "DNS COMMON PORTS",
-        "Target: " + data.domain,
-        "Open:   " + data.open + " of " + data.checked,
-        ""
-      ];
-
-      function portSection(title, status) {
-        const matches = data.results.filter((result) => result.status === status);
-        lines.push(title);
-        lines.push("-".repeat(title.length));
-
-        if (!matches.length) {
-          lines.push("None");
-          lines.push("");
-          return;
+    function renderWeb(data) {
+      resultTitle.textContent="Web ports · 80 / 443";
+      const opened=data.results.filter(r=>r.status==="OPEN");
+      const lines=["DNS WEB PORTS", "Domain: "+data.domain,"Hosts checked: "+data.checked+" of "+data.total,"Open endpoints: "+opened.length,"", "OPEN WEBSITES", "-------------"];
+      if(!opened.length)lines.push("No open endpoints confirmed yet.");
+      for(const r of opened)lines.push(r.url+"  "+r.detail);
+      lines.push("", "UNCONFIRMED", "-----------");
+      for(const r of data.results.filter(r=>r.status!=="OPEN"))lines.push(r.hostname+":"+r.port+"  "+r.detail);
+      lines.push("", "Only resolved hostnames retained by Standard Records are checked. Hidden wildcard matches are excluded.","Redirects are not followed. HTTP errors still confirm a responding web service.","Unconfirmed does not mean closed; TLS errors, filtering or Cloudflare restrictions can prevent confirmation.");
+      lastText=lines.join("\\n");
+      let html=escapeText(lastText);
+      for(const r of opened){const safe=escapeText(r.url);html=html.replace(safe+'  ', '<a href="'+safe+'" target="_blank" rel="noopener noreferrer">'+safe+'</a>  ');}
+      results.innerHTML='<div class="console-wrap"><pre class="console-output">'+html+'</pre></div>';
+    }
+    async function runWebCheck(){
+      if(webBusy)return;
+      if(!savedAudit||cleanDomain(domainInput.value).toLowerCase()!==savedAudit.domain){setStatus("Run Standard Records for this domain first.");return;}
+      const hosts=savedAudit.hosts.slice(),sequence=++lookupSequence;
+      const data={domain:savedAudit.domain,total:hosts.length,checked:0,results:[]};
+      webBusy=true;updateWebButton();renderWeb(data);
+      try {
+        for(let i=0;i<hosts.length;i+=4){
+          if(sequence!==lookupSequence)return;
+          const batch=hosts.slice(i,i+4);
+          setStatus("Checking web ports: "+i+" of "+hosts.length+" discovered hosts...");
+          const api=new URL("/api/lookup",location.origin);api.searchParams.set("mode","web");api.searchParams.set("name",data.domain);
+          try {
+            const response=await fetch(api,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({hosts:batch})});
+            const result=await response.json();if(!response.ok)throw Error(result.error||"Web check failed");
+            data.results.push(...result.results);
+          }catch {data.results.push(...batch.flatMap(hostname=>[80,443].map(port=>({hostname,port,status:"UNCONFIRMED",detail:"Batch failed; retry web check"}))));}
+          if(sequence!==lookupSequence)return;
+          data.checked+=batch.length;renderWeb(data);
         }
-
-        for (const result of matches) {
-          const port = String(result.port).padEnd(8, " ");
-          const time = (result.ms ? String(result.ms) + "ms" : "").padEnd(10, " ");
-          lines.push(port + time + result.label);
-        }
-        lines.push("");
-      }
-
-      portSection("OPEN PORTS", "OPEN");
-      portSection("CLOSED / FILTERED PORTS", "CLOSED");
-      portSection("SKIPPED PORTS", "SKIPPED");
-
-      lines.push("NOTE");
-      lines.push("----");
-      lines.push("This is a TCP connect check from Cloudflare, not a full security scan.");
-      lines.push("Port 25 is skipped because Cloudflare blocks outbound TCP 25.");
-
-      lastText = lines.join("\\n");
-      results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
+        setStatus(hosts.length?"Web check complete. Standard Records were not rescanned.":"No resolved hostnames available in this scan.");
+      }finally{webBusy=false;updateWebButton();}
     }
 
     function renderDomainInfo(data) {
@@ -1332,6 +1324,18 @@ function pageResponse() {
         lines.push(data.rdapError);
       }
 
+      lines.push("", "WHOIS / RDAP CONTACTS", "---------------------");
+      const roleNames={registrant:"Main / registrant",administrative:"Administrative",technical:"Technical",billing:"Billing",registrar:"Registrar",abuse:"Abuse"};
+      const contacts=data.contacts||[];
+      for(const contact of contacts){
+        lines.push("",(contact.roles||[]).map(r=>roleNames[r]||r).join(" / ")||"Other contact");
+        for(const [label,value] of [["Name",contact.name],["Organization",contact.organization],["Handle",contact.handle],["Associated with",contact.parent],["Email",(contact.email||[]).join("; ")],["Phone",(contact.phone||[]).join("; ")],["Address",(contact.address||[]).join("; ")],["Contact URL",(contact.url||[]).join("; ")]])if(value)lines.push(label+": "+value);
+        for(const remark of contact.remarks||[])lines.push(remark);
+        if(!contact.name&&!contact.organization&&!contact.email?.length&&!contact.phone?.length&&!contact.address?.length&&!contact.url?.length)lines.push("Contact details redacted or not published.");
+      }
+      for(const role of ["registrant","administrative","technical","billing"])if(!contacts.some(c=>(c.roles||[]).includes(role)))lines.push((roleNames[role])+": Not published or redacted.");
+      lines.push("Public registry RDAP contacts only; privacy-protected details are not available.");
+
       lastText = lines.join("\\n");
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
@@ -1344,6 +1348,7 @@ function pageResponse() {
       }
       const sequence = ++lookupSequence;
       currentAudit = null;
+      if(mode==="audit"){savedAudit=null;discoveredWebHosts=[];updateWebButton();}
       showWildcards = false;
 
       const url = new URL(location.href);
@@ -1432,8 +1437,7 @@ function pageResponse() {
         }
       }
 
-      if (mode === "audit") renderAudit(data);
-      else if (mode === "ports") renderPorts(data);
+      if (mode === "audit") {renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice()};updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") renderMail(data);
@@ -1462,7 +1466,7 @@ function pageResponse() {
 
     portsButton.addEventListener("click", async () => {
       try {
-        await runLookup("ports");
+        await runWebCheck();
       } catch (error) {
         setStatus(error.message || "Lookup failed.");
       }

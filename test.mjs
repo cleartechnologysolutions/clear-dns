@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 13/);
+assert.match(html, /Build 14/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -252,3 +252,45 @@ assert.match(client.report(), /stale.example.com  \[crt.sh\] No current A\/AAAA\
 assert.match(client.report(), /failed.example.com  \[crt.sh\] DNS check incomplete/);
 assert.match(client.report(), /pending.example.com  \[crt.sh\] DNS not yet checked/);
 console.log("PASS: 914-host and crt.sh coverage; root/www/certificate exemptions including overlaps; wildcard filtering despite unrelated DNS errors; distinct aliases retained; nested, IPv6, rotating answers and show/hide checks.");
+
+// New workflow must reuse the completed retained-host list, with no discovery requests.
+assert.doesNotMatch(html,/Common ports<\/button>/);
+assert.match(html,/id="ports" disabled/);
+const webRequests=[];
+client.fetch=async(url,options)=>{
+ const u=new URL(url);assert.equal(u.searchParams.get('mode'),'web');
+ const hosts=JSON.parse(options.body).hosts;assert.ok(hosts.length<=4);webRequests.push(...hosts);
+ return Response.json({results:hosts.flatMap(hostname=>[
+  {hostname,port:80,url:'http://'+hostname+'/',status:'OPEN',detail:'HTTP 301'},
+  {hostname,port:443,status:'UNCONFIRMED',detail:'No response'}
+ ])});
+};
+vm.runInContext('savedAudit={domain:"example.com",hosts:["www.example.com","jira.example.com"]};',client);
+await vm.runInContext('runWebCheck()',client);
+assert.deepEqual(webRequests,['www.example.com','jira.example.com']);
+assert.match(elements.get('results').innerHTML,/href="http:\/\/jira.example.com\/" target="_blank" rel="noopener noreferrer"/);
+assert.match(client.report(),/UNCONFIRMED/);
+elements.get('domain').value='other.example';
+await vm.runInContext('runWebCheck()',client);assert.equal(webRequests.length,2);
+assert.match(elements.get('status').textContent,/Standard Records.*first/);
+
+const contacts=server.rdapContacts([{roles:['registrant'],handle:'REG',vcardArray:['vcard',[
+ ['fn',{},'text','Example Owner'],['org',{},'text',['Example Org']],['email',{},'text','contact@example.com'],
+ ['adr',{label:'123 Main Street'},'text',['','','123 Main Street','City','State','12345','US']]
+]],entities:[{roles:['technical'],vcardArray:['vcard', [['fn',{},'text','Tech Support'],['tel',{},'uri','tel:+1-555-1234']]]}]},{roles:['administrative']}]);
+assert.equal(contacts.length,3);assert.equal(contacts[1].parent,'Example Owner');assert.equal(contacts[0].address[0],'123 Main Street');
+client.contactFixture=contacts;
+vm.runInContext('renderDomainInfo({domain:"example.com",registrar:"Registrar",registrant:"Owner",contacts:contactFixture})',client);
+assert.match(client.report(),/WHOIS \/ RDAP CONTACTS/);assert.match(client.report(),/Tech Support/);assert.match(client.report(),/contact@example.com/);assert.match(client.report(),/Billing: Not published or redacted/);
+assert.equal((await worker.fetch(new Request('https://dns.example/api/lookup?name=example.com&mode=web'))).status,405);
+assert.equal((await worker.fetch(new Request('https://dns.example/api/lookup?name=example.com&mode=web',{method:'POST',body:JSON.stringify({hosts:['outside.test']})}))).status,400);
+let headCalls=0,closed=0;
+server.fetch=async(url,options)=>{headCalls++;assert.equal(options.method,'HEAD');assert.equal(options.redirect,'manual');return new Response(null,{status:403});};
+const httpResult=await server.checkWebPort('www.example.com',443,'8.8.8.8');assert.equal(httpResult.status,'OPEN');assert.equal(httpResult.detail,'HTTP 403');
+server.fetch=async()=>{throw Error('TLS failure');};
+server.connect=()=>({opened:Promise.resolve(),closed:Promise.resolve(),close:async()=>{closed++;}});
+const tcpResult=await server.checkWebPort('www.example.com',443,'8.8.8.8');assert.equal(tcpResult.status,'OPEN');assert.match(tcpResult.detail,/not verified/);assert.equal(closed,1);
+server.connect=()=>({opened:Promise.reject(Error('restricted')),closed:Promise.resolve(),close:async()=>{closed++;}});
+const blocked=await server.checkWebPort('www.example.com',80,'8.8.8.8');assert.equal(blocked.status,'UNCONFIRMED');assert.equal(closed,2);
+for(const ip of ['127.0.0.1','10.0.0.1','169.254.169.254','100.64.0.1','::1','::ffff:127.0.0.1','fc00::1'])assert.equal(server.publicWebAddress(ip),false);
+console.log('PASS: cached discovered-host web checks, prior-scan/domain gate, clickable links, HTTP errors count as open, TCP fallback/cleanup, unconfirmed failures, nested RDAP contacts and redaction.');

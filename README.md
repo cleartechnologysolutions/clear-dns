@@ -1,6 +1,6 @@
 # DNS Tools
 
-DNS lookup, Standard Records, common port check, and domain info tool.
+DNS lookup, Standard Records, discovered-host web port check, and domain info tool.
 
 Deploy command:
 
@@ -10,7 +10,37 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
-Build 13 fixes wildcard filtering and always retains crt.sh discoveries.
+Build 14 replaces Common ports with Check web ports and adds public WHOIS/RDAP contacts.
+
+Run Standard Records first. Check web ports then checks only its retained, resolved
+A/AAAA/CNAME hostnames on 80 and 443. Hostnames are deduplicated; hidden wildcard
+results and certificate-only history without current answers are excluded. Switching
+to Domain info does not discard the saved scan; changing domains requires a scan
+for the new domain. Reloading the page clears the saved scan.
+
+The web check does not rerun the 914-name discovery or crt.sh. It does a safety DNS
+lookup only for each selected hostname to exclude private/special-use addresses.
+Requests run in batches of four hosts, at most two hosts concurrently. HTTP HEAD
+uses manual redirects: even 301/403/404 confirms a web response on that port.
+When HTTP/TLS fails, a bounded TCP connect is attempted against a validated IP.
+TCP-only results are explicitly marked as not having verified HTTP/TLS. Successful
+checks get clickable HTTP/HTTPS links in the text-style report. Failed checks say
+UNCONFIRMED rather than falsely asserting CLOSED. Cloudflare networking restrictions
+and remote filtering can prevent confirmation. Links open in a new tab.
+
+Domain info ends with WHOIS / RDAP CONTACTS: published main/registrant, technical,
+administrative, billing, registrar and nested abuse contacts. Includes names,
+organizations, email, phone, postal address and contact URLs where available.
+Redacted or unpublished contacts remain labeled unavailable; this does not bypass
+registry privacy protection. Sources: https://www.rfc-editor.org/rfc/rfc9083.html
+and https://developers.cloudflare.com/workers/runtime-apis/tcp-sockets/.
+
+Deploy by replacing files in the existing GitHub repository. Keep the existing
+Worker name in wrangler.json. No build command is needed; deploy remains
+`npx wrangler deploy`. No new bindings, paid service or local collector is needed.
+Validated with `node test.mjs` (mocked network); live deployment has not been tested.
+
+Existing wildcard filtering and crt.sh behavior remains included.
 Standard Records includes 914 unique hostnames checking A, AAAA
 and CNAME for each. This is a curated practical list, not a measured popularity
 ranking. It covers mail, development environments, source control and CI,
