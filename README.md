@@ -1,5 +1,23 @@
 # DNS Tools
 
+## Build 19 — crt.sh timeout handling and inline refresh
+
+Refresh controls now appear beside the Standard Records / Web ports result
+heading, rather than as separate sidebar actions. Navigation still uses saved
+results. The certificate-only retry is beside the same heading when needed.
+
+The crt.sh deadline increases from 15 to 45 seconds, including body reading.
+The browser retries a transient server/network failure once after 2 seconds,
+using a separate request; DNS and wildcard probes are not repeated. Progress
+shows the attempt number. Redirects, explicit 4xx errors, invalid/oversized
+responses are not automatically retried. A failed second attempt preserves DNS
+results and displays the error. This cannot guarantee upstream availability.
+
+A direct lookup of fourpointenergy.com returned HTTP 200 in 8.56 seconds during
+investigation. The deployed failure was not reproduced; the 15-second client
+deadline in our Worker was confirmed in source. No new bindings are required.
+
+
 ## Build 18 — saved results and targeted retries
 
 Standard Records and Web ports display their completed results when revisited.
@@ -160,6 +178,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 18 beneath it.
+The page will read DNS Tools with Build 19 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

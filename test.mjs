@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 18/);
+assert.match(html, /Build 19/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -351,3 +351,18 @@ vm.runInContext('savedAudit={domain:"other.example",hosts:["mail.other.example"]
 await vm.runInContext('extendMailCheck({...mailData,subdomains:undefined},lookupSequence)',client);
 assert.equal(called.length,callsBefore);
 console.log('PASS: discovered-only subdomain mail scope, bounded/deduplicated batches, primary-first report, SPF/TXT/MX, direct DMARC, hidden empty results, visible failures, and scan/domain gate.');
+
+// Transient crt.sh failure is automatically retried without repeating discovery DNS.
+elements.get('domain').value='example.com';
+vm.runInContext('savedAudit=standardCache.get("example.com");auditRunning=false;webBusy=false;',client);
+let attempts=0;
+client.fetch=async url=>{
+ assert.equal(new URL(url).searchParams.get('mode'),'crt');attempts++;
+ return attempts===1?Response.json({error:'crt.sh did not respond within 45 seconds.'},{status:502}):Response.json({names:[],patterns:[]});
+};
+await vm.runInContext('retryCertificateDiscovery()',client);
+assert.equal(attempts,2);
+assert.match(elements.get('status').textContent,/Certificate discovery updated/);
+assert.match(source,/controller.abort\(\), 45000/);
+assert.ok(html.indexOf('id="rescan-standard"')>html.indexOf('class="result-head"'));
+console.log('PASS: 45-second deadline, automatic transient retry, preserved DNS work, and refresh controls in result header.');
