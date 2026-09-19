@@ -1,5 +1,21 @@
 # DNS Tools
 
+## Build 17 — automatic scan and prominent progress
+
+Entering a valid domain starts Standard Records after a 1.2-second typing pause.
+Enter or leaving the changed field starts it immediately. An unchanged completed
+domain does not automatically rescan; Standard Records remains available to rerun.
+Domain query-string links also start automatically. Individual record type lookup
+controls are removed. Progress and prerequisite messages sit above the results.
+The progress bar measures the current phase; unknown-length phases such as crt.sh
+search use an indeterminate bar. Completion fills the bar and unlocks web checks.
+Other lookup actions are disabled during Standard Records to prevent accidental
+interruption. Changing the domain supersedes the previous scan.
+
+Validated in Chromium: automatic startup, duplicate-start prevention, removed
+selector, progress placement, crt.sh completion gate, 100% completion, and mobile
+width; existing network-mocked regressions passed. Live deployment not performed.
+
 ## Build 16 — subdomain mail records
 
 Mail check always shows the primary domain MX/SPF/TXT/DMARC information first.

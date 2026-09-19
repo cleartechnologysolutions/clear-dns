@@ -674,7 +674,6 @@ function noStoreHeaders(contentType) {
 }
 
 function pageResponse() {
-  const typeOptions = DNS_TYPES.map((type) => `<option value="${type}">${type}</option>`).join("");
   const html = `<!doctype html>
 <html lang="en">
 <head>
@@ -701,6 +700,11 @@ function pageResponse() {
     }
     button:disabled { opacity: .45; cursor: not-allowed; }
     .web-prerequisite { padding: 12px; border-left: 3px solid #22d3ee; background: #102333; color: #d6edf5; font-size: 13px; line-height: 1.65; }
+    .scan-status { padding:18px 20px; background:#102a3b; border-bottom:2px solid #22d3ee; }
+    .scan-status .status { margin:0 0 10px; color:#f1fcff; font-size:16px; font-weight:700; }
+    .scan-status .web-prerequisite { margin:12px 0 0; padding:0; border:0; background:transparent; }
+    #scan-progress { display:block; width:100%; height:16px; accent-color:#22d3ee; }
+    .input-help { font-size:13px; color:#c4d9e7; }
     main {
       width: min(1180px, calc(100% - 32px));
       margin: 0 auto;
@@ -947,7 +951,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 16</p>
+          <p class="brand-subtitle">Build 17</p>
         </div>
       </div>
     </header>
@@ -961,11 +965,7 @@ function pageResponse() {
           <label for="domain">Domain</label>
           <input id="domain" name="domain" autocomplete="off" spellcheck="false" placeholder="example.com">
 
-          <label for="type">Record type</label>
-          <div class="row">
-            <select id="type" name="type">${typeOptions}</select>
-            <button type="submit">Lookup</button>
-          </div>
+          <p class="input-help">Standard Records starts automatically after you enter a domain. Press Enter to start immediately.</p>
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
@@ -975,18 +975,23 @@ function pageResponse() {
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
           </div>
-          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
+
         </form>
 
-        <div class="status" id="status">Ready.</div>
+
       </aside>
 
       <section class="panel result">
+        <div class="scan-status">
+          <div class="status" id="status" role="status" aria-live="polite">Enter a domain to start Standard Records.</div>
+          <progress id="scan-progress" max="100" value="0" aria-label="Current scan phase progress"></progress>
+          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
+        </div>
         <div class="result-head">
           <p class="result-title" id="result-title">Results</p>
         </div>
         <div class="record-list" id="results">
-          <div class="empty">Enter a domain and run a lookup.</div>
+          <div class="empty">Enter a domain. Standard Records will start automatically.</div>
         </div>
       </section>
     </section>
@@ -995,7 +1000,7 @@ function pageResponse() {
   <script>
     const form = document.getElementById("lookup-form");
     const domainInput = document.getElementById("domain");
-    const typeInput = document.getElementById("type");
+    const progressBar = document.getElementById("scan-progress");
     const auditButton = document.getElementById("audit");
     const portsButton = document.getElementById("ports");
     const domainInfoButton = document.getElementById("domain-info");
@@ -1007,12 +1012,14 @@ function pageResponse() {
     const results = document.getElementById("results");
     let lastText = "";
     let lookupSequence = 0;
+    let autoScanTimer, activeScanDomain="";
     let showWildcards = false;
     let currentAudit = null;
     let savedAudit = null, discoveredWebHosts = [], webBusy = false, auditRunning = false;
     function updateWebButton(){
       const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
       portsButton.disabled=webBusy||auditRunning||!ready;
+      for(const button of [domainInfoButton,allButton,mailButton])button.disabled=auditRunning;
       const hint=document.getElementById("web-prerequisite");
       if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
@@ -1020,7 +1027,14 @@ function pageResponse() {
       else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
       portsButton.title=hint.textContent;
     }
-    domainInput.addEventListener("input",updateWebButton);
+    domainInput.addEventListener("input",()=>{
+      clearTimeout(autoScanTimer);
+      const domain=cleanDomain(domainInput.value).toLowerCase();
+      if(domain!==activeScanDomain&&auditRunning){++lookupSequence;auditRunning=false;activeScanDomain="";setStatus("Domain changed. Waiting for a valid domain...");}
+      updateWebButton();
+      autoScanTimer=setTimeout(()=>startStandard(false),1200);
+    });
+    domainInput.addEventListener("change",()=>startStandard(false));
 
     results.addEventListener("change", event => {
       if (event.target.id !== "show-wildcards" || !currentAudit) return;
@@ -1049,24 +1063,11 @@ function pageResponse() {
 
     function setStatus(message) {
       statusBox.textContent = message;
-    }
-
-    function recordHtml(type, record, statusText) {
-      const ttl = record.TTL ? "TTL " + record.TTL : statusText || "";
-      return '<article class="record"><div class="record-top"><span>' + escapeText(type) + '</span><span>' + escapeText(ttl) + '</span></div><pre class="record-data">' + escapeText(record.data || "") + '</pre></article>';
-    }
-
-    function renderSingle(type, data) {
-      const answers = data.Answer || [];
-      resultTitle.textContent = type + " records";
-      if (!answers.length) {
-        results.innerHTML = '<div class="empty">No ' + escapeText(type) + ' records found.<br>Status: ' + escapeText(data.StatusText || data.Status) + '</div>';
-        lastText = "No " + type + " records found.";
-        return;
-      }
-
-      results.innerHTML = answers.map((record) => recordHtml(type, record, data.StatusText)).join("");
-      lastText = answers.map((record) => type + " " + record.data).join("\\n");
+      const counts=message.match(/(\\d+) of (\\d+)/);
+      if(counts&&Number(counts[2])>0)progressBar.value=Math.round(Number(counts[1])/Number(counts[2])*100);
+      else if(/^(Done\\.|Scan complete|Web check complete)/.test(message))progressBar.value=100;
+      else if(/^(Looking up|Checking|Searching|Verifying)/.test(message))progressBar.removeAttribute("value");
+      else progressBar.value=0;
     }
 
     function renderAll(data) {
@@ -1404,13 +1405,15 @@ function pageResponse() {
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
-    async function runLookup(mode = "single") {
+    async function runLookup(mode = "audit") {
       const domain = cleanDomain(domainInput.value);
       if (!domain) {
         setStatus("Enter a domain first.");
         return;
       }
+      clearTimeout(autoScanTimer);
       const sequence = ++lookupSequence;
+      if(mode==="audit")activeScanDomain=domain.toLowerCase();
       currentAudit = null;
       auditRunning=mode==="audit";updateWebButton();
       if(mode==="audit"){savedAudit=null;discoveredWebHosts=[];updateWebButton();}
@@ -1426,7 +1429,7 @@ function pageResponse() {
       const api = new URL("/api/lookup", location.origin);
       api.searchParams.set("name", domain);
       api.searchParams.set("mode", mode);
-      api.searchParams.set("type", typeInput.value);
+
 
       const response = await fetch(api);
       let data = await response.json();
@@ -1506,29 +1509,24 @@ function pageResponse() {
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") {await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;}
-      else renderSingle(typeInput.value, data);
+
 
       setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. crt.sh discovery incomplete." : "Done.");
     }
 
-    form.addEventListener("submit", async (event) => {
-      event.preventDefault();
-      try {
-        await runLookup("single");
-      } catch (error) {
-        setStatus(error.message || "Lookup failed.");
-        results.innerHTML = '<div class="empty">Lookup failed.</div>';
-      }
-    });
-
-    auditButton.addEventListener("click", async () => {
-      try {
-        await runLookup("audit");
-      } catch (error) {
-        auditRunning=false;updateWebButton();
-        setStatus(error.message || "Lookup failed.");
-      }
-    });
+    async function startStandard(force=false){
+      clearTimeout(autoScanTimer);
+      const domain=cleanDomain(domainInput.value).toLowerCase();
+      if(!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(domain)){if(force)setStatus("Enter a valid domain, such as example.com.");return;}
+      if(auditRunning&&activeScanDomain===domain)return;
+      if(!force&&savedAudit?.domain===domain)return;
+      domainInput.value=domain;
+      const expectedSequence=lookupSequence+1;
+      try{await runLookup("audit");}
+      catch(error){if(expectedSequence!==lookupSequence)return;auditRunning=false;updateWebButton();setStatus(error.message||"Scan failed. Click Standard Records to retry.");}
+    }
+    form.addEventListener("submit",event=>{event.preventDefault();void startStandard(true);});
+    auditButton.addEventListener("click",()=>startStandard(true));
 
     portsButton.addEventListener("click", async () => {
       try {
@@ -1561,6 +1559,8 @@ function pageResponse() {
         setStatus(error.message || "Lookup failed.");
       }
     });
+
+    if(params.get("domain"))void startStandard(false);
 
     copyButton.addEventListener("click", async () => {
       if (!lastText) {

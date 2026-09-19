@@ -56,18 +56,18 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 16/);
+assert.match(html, /Build 17/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
 const elements = new Map();
 const batches = [];
 const client = vm.createContext({
-  URL, URLSearchParams,
+  URL, URLSearchParams, setTimeout, clearTimeout,
   location: { href: "https://dns.example/", origin: "https://dns.example", search: "" },
   history: { replaceState() {} },
   document: { getElementById(id) {
-    if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", listeners: {}, addEventListener(event, handler) { this.listeners[event] = handler; } });
+    if (!elements.has(id)) elements.set(id, { value: "", innerHTML: "", textContent: "", removeAttribute(name) { delete this[name]; }, listeners: {}, addEventListener(event, handler) { this.listeners[event] = handler; } });
     return elements.get(id);
   }},
   fetch: async (url, options) => {
@@ -80,7 +80,7 @@ const client = vm.createContext({
 vm.runInContext(html.match(/<script>([\s\S]*?)<\/script>/)[1] +
   "\nglobalThis.run = runLookup; globalThis.render = renderAudit; globalThis.report = () => lastText;", client);
 elements.get("domain").value = "example.com";
-elements.get("type").value = "A";
+
 await client.run("audit");
 
 const requested = "www mail ftp webmail smtp pop web cpanel m imap test blog pop3 dev secure api admin whm forum remote vpn app shop store support portal server news staging host beta crm en mx1 sso status billing docs chat video cloud sql login uat db connect".split(" ");
