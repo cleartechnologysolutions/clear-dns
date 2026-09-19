@@ -10,6 +10,8 @@ npx wrangler deploy
 
 No database, R2 bucket, or bindings are required.
 
+Build 15 adds a visible two-step instruction: finish Standard Records before Check web ports unlocks. The instruction updates during scanning and when ready.
+
 Build 14 replaces Common ports with Check web ports and adds public WHOIS/RDAP contacts.
 
 Run Standard Records first. Check web ports then checks only its retained, resolved

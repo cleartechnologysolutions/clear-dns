@@ -687,6 +687,8 @@ function pageResponse() {
         radial-gradient(circle at top right, rgba(34, 211, 238, 0.16), transparent 34rem),
         linear-gradient(180deg, #07111d 0%, #0b1625 100%);
     }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .web-prerequisite { padding: 12px; border-left: 3px solid #22d3ee; background: #102333; color: #d6edf5; font-size: 13px; line-height: 1.65; }
     main {
       width: min(1180px, calc(100% - 32px));
       margin: 0 auto;
@@ -933,7 +935,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 14</p>
+          <p class="brand-subtitle">Build 15</p>
         </div>
       </div>
     </header>
@@ -955,12 +957,13 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
-            <button type="button" class="secondary" id="ports" disabled title="Run Standard Records first">Check web ports</button>
+            <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="all">All common records</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
           </div>
+          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
         </form>
 
         <div class="status" id="status">Ready.</div>
@@ -994,8 +997,17 @@ function pageResponse() {
     let lookupSequence = 0;
     let showWildcards = false;
     let currentAudit = null;
-    let savedAudit = null, discoveredWebHosts = [], webBusy = false;
-    function updateWebButton(){portsButton.disabled=webBusy||!savedAudit||cleanDomain(domainInput.value).toLowerCase()!==savedAudit.domain; }
+    let savedAudit = null, discoveredWebHosts = [], webBusy = false, auditRunning = false;
+    function updateWebButton(){
+      const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
+      portsButton.disabled=webBusy||auditRunning||!ready;
+      const hint=document.getElementById("web-prerequisite");
+      if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
+      else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
+      else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
+      else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
+      portsButton.title=hint.textContent;
+    }
     domainInput.addEventListener("input",updateWebButton);
 
     results.addEventListener("change", event => {
@@ -1099,7 +1111,7 @@ function pageResponse() {
 
     function renderAudit(data) {
       currentAudit = data;
-      resultTitle.textContent = "Standard Records";
+      resultTitle.textContent = auditRunning ? "Standard Records — scan in progress (partial results)" : "Standard Records";
       const resolved = data.checks.filter(check => check.answers.length);
       const names = new Map();
       for (const check of data.checks) {
@@ -1134,6 +1146,7 @@ function pageResponse() {
 
       const lines = [
         "DNS STANDARD RECORDS",
+        auditRunning ? "SCAN IN PROGRESS — PARTIAL RESULTS. Wait for the full scan before checking web ports." : "SCAN COMPLETE — Check web ports is ready.",
         "Domain: " + data.domain,
         "Scope:  " + data.hostCount + " service/vendor hostnames + root/mail records + crt.sh discovery",
         "Found:  " + data.found + " of " + data.checked + " checks",
@@ -1348,6 +1361,7 @@ function pageResponse() {
       }
       const sequence = ++lookupSequence;
       currentAudit = null;
+      auditRunning=mode==="audit";updateWebButton();
       if(mode==="audit"){savedAudit=null;discoveredWebHosts=[];updateWebButton();}
       showWildcards = false;
 
@@ -1437,7 +1451,7 @@ function pageResponse() {
         }
       }
 
-      if (mode === "audit") {renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice()};updateWebButton();}
+      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice()};updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") renderMail(data);
@@ -1460,6 +1474,7 @@ function pageResponse() {
       try {
         await runLookup("audit");
       } catch (error) {
+        auditRunning=false;updateWebButton();
         setStatus(error.message || "Lookup failed.");
       }
     });
