@@ -951,7 +951,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 17</p>
+          <p class="brand-subtitle">Build 18</p>
         </div>
       </div>
     </header>
@@ -969,9 +969,10 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
+            <button type="button" class="secondary" id="rescan-standard">Re-scan Standard Records</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
+            <button type="button" class="secondary" id="rescan-web" disabled>Re-scan web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
-            <button type="button" class="secondary" id="all">All common records</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
           </div>
@@ -984,6 +985,7 @@ function pageResponse() {
       <section class="panel result">
         <div class="scan-status">
           <div class="status" id="status" role="status" aria-live="polite">Enter a domain to start Standard Records.</div>
+          <button type="button" id="retry-crt" hidden>Retry crt.sh only</button>
           <progress id="scan-progress" max="100" value="0" aria-label="Current scan phase progress"></progress>
           <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
         </div>
@@ -1000,11 +1002,13 @@ function pageResponse() {
   <script>
     const form = document.getElementById("lookup-form");
     const domainInput = document.getElementById("domain");
+    const retryCrtButton=document.getElementById("retry-crt");
     const progressBar = document.getElementById("scan-progress");
     const auditButton = document.getElementById("audit");
     const portsButton = document.getElementById("ports");
     const domainInfoButton = document.getElementById("domain-info");
-    const allButton = document.getElementById("all");
+    const rescanStandardButton=document.getElementById("rescan-standard");
+    const rescanWebButton=document.getElementById("rescan-web");
     const mailButton = document.getElementById("mail");
     const copyButton = document.getElementById("copy");
     const statusBox = document.getElementById("status");
@@ -1015,11 +1019,16 @@ function pageResponse() {
     let autoScanTimer, activeScanDomain="";
     let showWildcards = false;
     let currentAudit = null;
+    const standardCache=new Map(),webCache=new Map();
     let savedAudit = null, discoveredWebHosts = [], webBusy = false, auditRunning = false;
     function updateWebButton(){
       const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
+      retryCrtButton.hidden=!(ready&&savedAudit.data?.crtNote?.startsWith("crt.sh discovery incomplete"));
+      retryCrtButton.disabled=webBusy||auditRunning;
       portsButton.disabled=webBusy||auditRunning||!ready;
-      for(const button of [domainInfoButton,allButton,mailButton])button.disabled=auditRunning;
+      for(const button of [domainInfoButton,mailButton,auditButton,rescanStandardButton])button.disabled=auditRunning||webBusy;
+      rescanWebButton.disabled=webBusy||auditRunning||!ready;
+      portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
       if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
@@ -1318,9 +1327,11 @@ function pageResponse() {
       for(const r of opened){const safe=escapeText(r.url);html=html.replace(safe+'  ', '<a href="'+safe+'" target="_blank" rel="noopener noreferrer">'+safe+'</a>  ');}
       results.innerHTML='<div class="console-wrap"><pre class="console-output">'+html+'</pre></div>';
     }
-    async function runWebCheck(){
-      if(webBusy)return;
+    async function runWebCheck(force=false){
+      clearTimeout(autoScanTimer);
+      if(webBusy||auditRunning)return;
       if(!savedAudit||cleanDomain(domainInput.value).toLowerCase()!==savedAudit.domain){setStatus("Run Standard Records for this domain first.");return;}
+      if(!force&&webCache.has(savedAudit.domain)){renderWeb(webCache.get(savedAudit.domain));setStatus("Done. Showing saved web-port results. Use Re-scan web ports to check again.");return;}
       const hosts=savedAudit.hosts.slice(),sequence=++lookupSequence;
       const data={domain:savedAudit.domain,total:hosts.length,checked:0,results:[]};
       webBusy=true;updateWebButton();renderWeb(data);
@@ -1338,6 +1349,7 @@ function pageResponse() {
           if(sequence!==lookupSequence)return;
           data.checked+=batch.length;renderWeb(data);
         }
+        webCache.set(data.domain,data);
         setStatus(hosts.length?"Web check complete. Standard Records were not rescanned.":"No resolved hostnames available in this scan.");
       }finally{webBusy=false;updateWebButton();}
     }
@@ -1405,6 +1417,55 @@ function pageResponse() {
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
+    async function discoverForAudit(data, sequence) {
+      const domain=data.domain;
+        // Show standard results immediately while the certificate search runs.
+        renderAudit(data);
+        setStatus("Searching crt.sh for additional hostnames...");
+        try {
+          const discoveryApi = new URL("/api/lookup", location.origin);
+          discoveryApi.searchParams.set("name", domain);
+          discoveryApi.searchParams.set("mode", "crt");
+          const discoveryResponse = await fetch(discoveryApi);
+          const discovery = await discoveryResponse.json();
+          if (sequence !== lookupSequence) return;
+          if (!discoveryResponse.ok) throw new Error(discovery.error || "Search failed.");
+          // Retain certificate provenance even when the standard scan already
+          // queried this name and no extra certificate DNS tasks are needed.
+          data.certificateNames = [...new Set([...(data.certificateNames||[]),...discovery.names])];
+          data.certificatePatterns = [...new Set([...(data.certificatePatterns||[]),...(discovery.patterns||[])])];
+          const certified = new Set(data.certificateNames);
+          data.checks = data.checks.map(check => certified.has(check.name) ? { ...check, source: "crt.sh" } : check);
+
+          const existing = new Set(data.checks.map(check => check.name + "|" + check.type));
+          const tasks = discovery.names.flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })))
+            .filter(task => !existing.has(task.name + "|" + task.type));
+          data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames and " + data.certificatePatterns.length + " wildcard patterns discovered." +
+            (discovery.limited ? " Limited to the first 1,000 unique certificate names/patterns." : "");
+          renderAudit(data);
+          discoveryApi.searchParams.set("mode", "crt-records");
+          for (let offset = 0; offset < tasks.length; offset += 40) {
+            setStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");
+            const checksResponse = await fetch(discoveryApi, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ tasks: tasks.slice(offset, offset + 40) }),
+            });
+            const batch = await checksResponse.json();
+            if (sequence !== lookupSequence) return;
+            if (!checksResponse.ok) throw new Error(batch.error || "DNS verification failed.");
+            data.checks = data.checks.concat(batch.checks);
+            data.checked += batch.checks.length;
+            data.found += batch.checks.filter(check => check.answers.length).length;
+            renderAudit(data);
+          }
+        } catch (error) {
+          if (sequence !== lookupSequence) return;
+          data.crtNote = "crt.sh discovery incomplete: " + (error.message || "Service unavailable.") +
+            " Showing completed DNS checks.";
+        }
+    }
+
     async function runLookup(mode = "audit") {
       const domain = cleanDomain(domainInput.value);
       if (!domain) {
@@ -1416,7 +1477,7 @@ function pageResponse() {
       if(mode==="audit")activeScanDomain=domain.toLowerCase();
       currentAudit = null;
       auditRunning=mode==="audit";updateWebButton();
-      if(mode==="audit"){savedAudit=null;discoveredWebHosts=[];updateWebButton();}
+      if(mode==="audit"){standardCache.delete(domain);webCache.delete(domain);savedAudit=null;discoveredWebHosts=[];updateWebButton();}
       showWildcards = false;
 
       const url = new URL(location.href);
@@ -1458,75 +1519,54 @@ function pageResponse() {
           };
           renderAudit(data);
         }
-        // Show standard results immediately while the certificate search runs.
-        renderAudit(data);
-        setStatus("Searching crt.sh for additional hostnames...");
-        try {
-          const discoveryApi = new URL("/api/lookup", location.origin);
-          discoveryApi.searchParams.set("name", domain);
-          discoveryApi.searchParams.set("mode", "crt");
-          const discoveryResponse = await fetch(discoveryApi);
-          const discovery = await discoveryResponse.json();
-          if (sequence !== lookupSequence) return;
-          if (!discoveryResponse.ok) throw new Error(discovery.error || "Search failed.");
-          // Retain certificate provenance even when the standard scan already
-          // queried this name and no extra certificate DNS tasks are needed.
-          data.certificateNames = discovery.names;
-          data.certificatePatterns = discovery.patterns || [];
-          const certified = new Set(discovery.names);
-          data.checks = data.checks.map(check => certified.has(check.name) ? { ...check, source: "crt.sh" } : check);
-
-          const existing = new Set(data.checks.map(check => check.name + "|" + check.type));
-          const tasks = discovery.names.flatMap(name => ["A", "AAAA", "CNAME"].map(type => ({ name, type })))
-            .filter(task => !existing.has(task.name + "|" + task.type));
-          data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames and " + data.certificatePatterns.length + " wildcard patterns discovered." +
-            (discovery.limited ? " Limited to the first 1,000 unique certificate names/patterns." : "");
-          renderAudit(data);
-          discoveryApi.searchParams.set("mode", "crt-records");
-          for (let offset = 0; offset < tasks.length; offset += 40) {
-            setStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");
-            const checksResponse = await fetch(discoveryApi, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ tasks: tasks.slice(offset, offset + 40) }),
-            });
-            const batch = await checksResponse.json();
-            if (sequence !== lookupSequence) return;
-            if (!checksResponse.ok) throw new Error(batch.error || "DNS verification failed.");
-            data.checks = data.checks.concat(batch.checks);
-            data.checked += batch.checks.length;
-            data.found += batch.checks.filter(check => check.answers.length).length;
-            renderAudit(data);
-          }
-        } catch (error) {
-          if (sequence !== lookupSequence) return;
-          data.crtNote = "crt.sh discovery incomplete: " + (error.message || "Service unavailable.") +
-            " Showing completed DNS checks.";
-        }
+        await discoverForAudit(data,sequence);
+        if(sequence!==lookupSequence)return;
       }
 
-      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice()};updateWebButton();}
+      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") {await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;}
 
 
-      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. crt.sh discovery incomplete." : "Done.");
+      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. "+data.crtNote+" Use Retry crt.sh only." : "Done.");
     }
+
+    async function retryCertificateDiscovery(){
+      clearTimeout(autoScanTimer);
+      const domain=cleanDomain(domainInput.value).toLowerCase();
+      if(auditRunning||webBusy||savedAudit?.domain!==domain||!savedAudit.data)return;
+      const data=savedAudit.data, previousHosts=savedAudit.hosts.join("|");
+      const sequence=++lookupSequence;
+      auditRunning=true;activeScanDomain=domain;updateWebButton();
+      await discoverForAudit(data,sequence);
+      if(sequence!==lookupSequence)return;
+      auditRunning=false;renderAudit(data);
+      savedAudit={domain,hosts:discoveredWebHosts.slice(),data};
+      standardCache.set(domain,savedAudit);
+      if(savedAudit.hosts.join("|")!==previousHosts)webCache.delete(domain);
+      updateWebButton();
+      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
+    }
+    retryCrtButton.addEventListener("click",()=>retryCertificateDiscovery());
 
     async function startStandard(force=false){
       clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();
       if(!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(domain)){if(force)setStatus("Enter a valid domain, such as example.com.");return;}
       if(auditRunning&&activeScanDomain===domain)return;
-      if(!force&&savedAudit?.domain===domain)return;
+      if(webBusy)return;
+      const cached=standardCache.get(domain)||(savedAudit?.domain===domain?savedAudit:null);
+      if(!force&&cached?.data){savedAudit=cached;renderAudit(cached.data);updateWebButton();setStatus(cached.data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+cached.data.crtNote+" Use Retry crt.sh only.":"Done. Showing saved Standard Records. Use Re-scan Standard Records to refresh.");return;}
       domainInput.value=domain;
       const expectedSequence=lookupSequence+1;
       try{await runLookup("audit");}
       catch(error){if(expectedSequence!==lookupSequence)return;auditRunning=false;updateWebButton();setStatus(error.message||"Scan failed. Click Standard Records to retry.");}
     }
-    form.addEventListener("submit",event=>{event.preventDefault();void startStandard(true);});
-    auditButton.addEventListener("click",()=>startStandard(true));
+    form.addEventListener("submit",event=>{event.preventDefault();void startStandard(false);});
+    auditButton.addEventListener("click",()=>startStandard(false));
+    rescanStandardButton.addEventListener("click",()=>startStandard(true));
+    rescanWebButton.addEventListener("click",async()=>{try{await runWebCheck(true);}catch(error){setStatus(error.message||"Web check failed.");}});
 
     portsButton.addEventListener("click", async () => {
       try {
@@ -1539,14 +1579,6 @@ function pageResponse() {
     domainInfoButton.addEventListener("click", async () => {
       try {
         await runLookup("domain");
-      } catch (error) {
-        setStatus(error.message || "Lookup failed.");
-      }
-    });
-
-    allButton.addEventListener("click", async () => {
-      try {
-        await runLookup("all");
       } catch (error) {
         setStatus(error.message || "Lookup failed.");
       }

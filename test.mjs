@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 17/);
+assert.match(html, /Build 18/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -160,8 +160,25 @@ crtFailure = 503;
 await client.run("audit");
 assert.match(client.report(), /connect.example.com A/);
 assert.match(client.report(), /crt.sh discovery incomplete: crt.sh returned HTTP 503/);
-assert.equal(elements.get("status").textContent, "Done. crt.sh discovery incomplete.");
+assert.match(elements.get("status").textContent, /Done.*HTTP 503.*Retry crt.sh only/);
 assert.doesNotMatch(client.report(), /retired.example.com|NOT FOUND/);
+// Saved navigation makes no network calls; certificate-only retry preserves DNS work.
+assert.equal(elements.get("retry-crt").hidden,false);
+const beforeRetryQueries=queries.length, beforeRetryProbes=probeQueries.length, beforeRetryCrt=crtCalls;
+await vm.runInContext('startStandard(false)',client);
+assert.equal(queries.length,beforeRetryQueries);assert.equal(crtCalls,beforeRetryCrt);
+crtFailure=0;
+await vm.runInContext('retryCertificateDiscovery()',client);
+assert.equal(crtCalls,beforeRetryCrt+1);assert.equal(probeQueries.length,beforeRetryProbes);
+assert.equal(queries.length-beforeRetryQueries,54);
+assert.match(client.report(),/connect.example.com A/);
+assert.equal(elements.get("retry-crt").hidden,true);
+const afterRetryQueries=queries.length;
+await vm.runInContext('startStandard(false)',client);
+assert.equal(queries.length,afterRetryQueries);
+await vm.runInContext('startStandard(true)',client);
+assert.ok(queries.length>afterRetryQueries);
+assert.doesNotMatch(html,/All common records<\/button>/);
 crtFailure = 302;
 const redirected = await worker.fetch(new Request("https://dns.example/api/lookup?name=example.com&mode=crt"));
 assert.equal(redirected.status, 502);
@@ -270,8 +287,10 @@ await vm.runInContext('runWebCheck()',client);
 assert.deepEqual(webRequests,['www.example.com','jira.example.com']);
 assert.match(elements.get('results').innerHTML,/href="http:\/\/jira.example.com\/" target="_blank" rel="noopener noreferrer"/);
 assert.match(client.report(),/UNCONFIRMED/);
-elements.get('domain').value='other.example';
 await vm.runInContext('runWebCheck()',client);assert.equal(webRequests.length,2);
+await vm.runInContext('runWebCheck(true)',client);assert.equal(webRequests.length,4);
+elements.get('domain').value='other.example';
+await vm.runInContext('runWebCheck()',client);assert.equal(webRequests.length,4);
 assert.match(elements.get('status').textContent,/Standard Records.*first/);
 
 const contacts=server.rdapContacts([{roles:['registrant'],handle:'REG',vcardArray:['vcard',[

@@ -1,5 +1,19 @@
 # DNS Tools
 
+## Build 18 — saved results and targeted retries
+
+Standard Records and Web ports display their completed results when revisited.
+Separate Re-scan buttons explicitly run them again. Results are retained per
+domain for the current page session, until reload. A fresh Standard Records scan
+invalidates its old web results. All common records has been removed from the UI.
+
+A crt.sh failure now displays the actual error above the results and offers
+Retry crt.sh only. This preserves completed DNS records and wildcard checks,
+fetches certificate discovery again, and resolves only additional names.
+Web results are invalidated only if retry changes the retained hostname list.
+Provider failures remain visible; retry cannot guarantee crt.sh availability.
+
+
 ## Build 17 — automatic scan and prominent progress
 
 Entering a valid domain starts Standard Records after a 1.2-second typing pause.
@@ -146,6 +160,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 13 beneath it.
+The page will read DNS Tools with Build 18 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs
