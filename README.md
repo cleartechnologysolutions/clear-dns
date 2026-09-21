@@ -1,5 +1,34 @@
 # DNS Tools
 
+## Build 23 — SPF analysis and DNS Health
+
+Mail Check now appends a bounded static SPF policy analysis: nested includes and
+redirects, duplicate/missing records, loops, common mechanism/CIDR syntax issues,
++all and ignored/unreachable terms. It counts DNS-triggering terms in expanded
+branches, excluding initial TXT retrieval. Counts above ten are reported as a
+potential evaluation-path risk, not an unconditional sender permerror. Macros
+are explicitly incomplete. This is not full SPF evaluation: sender IP/identity,
+void lookup count and A/MX address-expansion limits are not evaluated. Expansion
+is bounded to 20 TXT fetches, depth 10, 60 visits and a 40-second budget. DNS
+lookups now have an 8-second request deadline.
+
+DNS Health discovers NS through recursive DNS and directly queries each
+published server for SOA, NS, MX, TXT, A and AAAA with recursion disabled over
+TCP port 53. It compares authoritative, non-truncated NOERROR answers, ignoring
+TTLs; fewer than two usable replies or missing servers is incomplete. Different
+answers may be propagation/geographic behavior, not necessarily a defect.
+Results show timings, records and errors, with cached navigation and Refresh.
+This is not a parent-delegation/glue or DNSSEC validation audit. TCP restrictions
+can prevent checks even when a nameserver serves UDP successfully. At most 16
+servers are checked, one at a time. After a connection failure remaining checks
+for that server are left incomplete.
+
+Validation: node diagnostics-test.mjs and all four existing test suites.
+Network behavior is mocked; this build has not been deployed or live tested
+from Cloudflare. No new bindings or dependencies.
+SPF reference: https://www.rfc-editor.org/rfc/rfc7208.html
+
+
 ## Build 22 — reverse DNS from Standard Records
 
 Reverse DNS / PTR unlocks after Standard Records completes. It uses the saved
@@ -239,6 +268,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 22 beneath it.
+The page will read DNS Tools with Build 23 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

@@ -560,12 +560,15 @@ async function checkWebHost(hostname) {
   finally {clearTimeout(timer);}
 }
 
-async function lookupDns(name, type) {
+async function lookupDns(name, type, timeoutMs=8000) {
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),timeoutMs);
+  try {
   const query = new URL(DNS_ENDPOINT);
   query.searchParams.set("name", name);
   query.searchParams.set("type", type);
 
   const response = await fetch(query, {
+    signal:controller.signal,
     headers: {
       accept: "application/dns-json",
       "user-agent": "DNSTools/1.0",
@@ -579,6 +582,7 @@ async function lookupDns(name, type) {
   const data = await response.json();
   data.StatusText = STATUS_TEXT[data.Status] || `Code ${data.Status}`;
   return data;
+  } finally {clearTimeout(timer);}
 }
 
 async function apiResponse(request) {
@@ -605,6 +609,9 @@ async function apiResponse(request) {
       let tasks;try{const {ips}=JSON.parse(raw);if(!Array.isArray(ips)||!ips.length||ips.length>20)throw Error();tasks=[...new Set(ips.map(reverseDnsName))].map(name=>({name,type:"PTR"}));}catch{return Response.json({error:"Provide 1–20 valid IP addresses."},{status:400});}
       return Response.json({checks:await runDnsTasks(tasks)},{headers:noStoreHeaders("application/json")});
     }
+    if(mode==="spf-analysis")return Response.json(await analyzeSpf(domain),{headers:noStoreHeaders("application/json")});
+    if(mode==="health")return Response.json(await dnsHealthInventory(domain),{headers:noStoreHeaders("application/json")});
+    if(mode==="health-server")return Response.json(await dnsHealthServer(domain,String(url.searchParams.get("server")||"")),{headers:noStoreHeaders("application/json")});
     if (mode === "mail") {
       const [mx, txt, dmarc] = await Promise.all([
         lookupDns(domain, "MX"),
@@ -993,7 +1000,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 22</p>
+          <p class="brand-subtitle">Build 23</p>
         </div>
       </div>
     </header>
@@ -1014,6 +1021,7 @@ function pageResponse() {
             <button type="button" class="secondary" id="ptr" disabled title="Finish Standard Records first">Reverse DNS / PTR</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
+            <button type="button" class="secondary" id="health">DNS Health</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
             <button type="button" class="secondary" id="dns-lookup">DNS Lookup</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
@@ -1037,6 +1045,7 @@ function pageResponse() {
         <div class="result-head">
           <p class="result-title" id="result-title">Results</p>
           <div class="result-actions">
+            <button type="button" class="secondary" id="refresh-health" hidden aria-label="Refresh DNS Health">↻ Refresh</button>
             <button type="button" class="secondary" id="refresh-ptr" hidden aria-label="Refresh PTR records">↻ Refresh</button>
             <button type="button" class="secondary" id="retry-crt" hidden>Retry crt.sh only</button>
             <button type="button" class="secondary" id="rescan-standard" hidden title="Run Standard Records again" aria-label="Refresh Standard Records">↻ Refresh</button>
@@ -1058,6 +1067,7 @@ function pageResponse() {
     const auditButton = document.getElementById("audit");
     const ptrButton=document.getElementById("ptr"),refreshPtrButton=document.getElementById("refresh-ptr");
     const portsButton = document.getElementById("ports");
+    const healthButton=document.getElementById("health");
     const domainInfoButton = document.getElementById("domain-info");
     const rescanStandardButton=document.getElementById("rescan-standard");
     const rescanWebButton=document.getElementById("rescan-web");
@@ -1073,6 +1083,7 @@ function pageResponse() {
     let currentAudit = null, resultView="";
     function setResultView(view){
       resultView=view;
+      document.getElementById("refresh-health").hidden=view!=="health";
       refreshPtrButton.hidden=view!=="ptr";
       rescanStandardButton.hidden=view!=="audit";
       rescanWebButton.hidden=view!=="web";
@@ -1084,14 +1095,16 @@ function pageResponse() {
       const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
       retryCrtButton.hidden=!(resultView==="audit"&&ready&&savedAudit.data?.crtNote?.startsWith("crt.sh discovery incomplete"));
       retryCrtButton.disabled=webBusy||auditRunning;
+      document.getElementById("refresh-health").disabled=webBusy||auditRunning;
       ptrButton.disabled=refreshPtrButton.disabled=webBusy||auditRunning||!ready;
       portsButton.disabled=webBusy||auditRunning||!ready;
-      for(const button of [domainInfoButton,mailButton,auditButton,rescanStandardButton])button.disabled=auditRunning||webBusy;
+      for(const button of [healthButton,domainInfoButton,mailButton,auditButton,rescanStandardButton])button.disabled=auditRunning||webBusy;
       rescanWebButton.disabled=webBusy||auditRunning||!ready;
       portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
       if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
       else if(webBusy&&resultView==="ptr"){hint.textContent="Checking reverse DNS for IP addresses from the saved Standard Records scan.";}
+      else if(webBusy&&resultView==="health"){hint.textContent="Comparing published authoritative nameservers.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
       else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
       else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
@@ -1196,6 +1209,10 @@ function decodeTxtPresentation(value) {
         if(!records.length)continue;
         lines.push("",title+" RECORDS","-".repeat(title.length+8),...records);
       }
+      lines.push("", "SPF ANALYSIS", "------------");
+      if(!data.analysis)lines.push("Detailed SPF analysis pending.");
+      else if(data.analysis.error)lines.push("INCOMPLETE: "+data.analysis.error);
+      else {lines.push("Expanded DNS-triggering terms: "+data.analysis.lookupTerms,"Expansion complete: "+data.analysis.complete);for(const row of data.analysis.records)lines.push("  ".repeat(row.depth)+row.name+": "+(row.records.join(" | ")||"No SPF record"));for(const issue of data.analysis.issues)lines.push(issue.level+": "+issue.text);if(!data.analysis.issues.length)lines.push("No issues detected by these static checks.");lines.push(data.analysis.note);}
       lines.push("", "SUBDOMAIN MAIL RECORDS", "----------------------");
       const sub=data.subdomains;
       if(!sub){lines.push("Complete Standard Records to include subdomain mail records. Then click Mail check again.");}
@@ -1696,7 +1713,11 @@ function reverseDnsName(value){
       if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);rememberScan();updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
-      else if (mode === "mail") {await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;}
+      else if (mode === "mail") {
+        renderMail(data);setStatus("Checking SPF includes and policy syntax...");
+        try{const u=new URL(api);u.searchParams.set("mode","spf-analysis");const r=await fetch(u);data.analysis=await r.json();}catch(e){data.analysis={error:e.message};}
+        if(sequence!==lookupSequence)return;renderMail(data);await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;
+      }
 
 
       setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. "+data.crtNote+" Use Retry crt.sh only." : "Done.");
@@ -1763,6 +1784,53 @@ function reverseDnsName(value){
         setStatus(error.message || "Lookup failed.");
       }
     });
+
+    const healthCache=new Map();
+    function renderHealth(data){
+      setResultView('health');resultTitle.textContent='DNS Health';
+      const lines=['DNS HEALTH','Domain: '+data.domain,'Nameservers checked: '+data.reports.length+' of '+data.servers.length,''];
+      if(data.servers.length<2)lines.push('WARNING: Fewer than two nameservers published.');
+      if(data.limited)lines.push('INCOMPLETE: Only the first 16 nameservers are checked.');
+      for(const type of ['SOA','NS','MX','TXT','A','AAAA']){
+        const usable=data.reports.map(r=>({server:r.server,result:r.results.find(c=>c.type===type)})).filter(r=>r.result&&!r.result.error&&r.result.status==='NOERROR'&&r.result.authoritative&&!r.result.truncated);
+        const sets=usable.map(r=>JSON.stringify([...new Set(r.result.answers.filter(a=>a.type===type&&a.name.toLowerCase().replace(/\.$/,'')===data.domain).map(a=>type==='TXT'?decodeTxtPresentation(a.value):a.value.toLowerCase()))].sort()));
+        const distinct=new Set(sets).size;
+        lines.push(type+': '+(distinct>1?'DIFFERENT answers — review below':usable.length<2?'INCOMPLETE — fewer than two authoritative responses':usable.length!==data.servers.length?'Matching available answers; comparison incomplete':'Answers agree')+' ('+usable.length+'/'+data.servers.length+' authoritative responses)');
+      }
+      for(const report of data.reports){lines.push('',report.server,'-'.repeat(report.server.length));for(const r of report.results){
+        if(r.error){lines.push(r.type+': INCOMPLETE — '+r.error);continue;}
+        lines.push(r.type+': '+r.status+' | authoritative: '+r.authoritative+' | '+r.ms+' ms');
+        if(!r.authoritative)lines.push('WARNING: Server did not return an authoritative response.');
+        if(r.truncated)lines.push('INCOMPLETE: Truncated response.');
+        for(const answer of r.answers)lines.push('  '+answer.name+' '+answer.type+' TTL '+answer.ttl+' '+answer.value);
+        if(!r.answers.length)lines.push('  No answer records.');
+      }}
+      lines.push('','Published nameservers discovered through recursive DNS, then queried directly over TCP with recursion disabled.','This is not a parent-delegation, glue or DNSSEC validation audit. TTL differences are ignored.','Different answers may reflect propagation, load balancing or location-based DNS; review before changing anything.');
+      lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
+    }
+    async function runHealth(force=false){
+      clearTimeout(autoScanTimer);if(auditRunning||webBusy)return;
+      const domain=cleanDomain(domainInput.value).toLowerCase();if(!domain){setStatus('Enter a domain first.');return;}
+      if(!force&&healthCache.has(domain)){renderHealth(healthCache.get(domain));setStatus('Done. Showing saved DNS Health results.');return;}
+      const sequence=++lookupSequence;webBusy=true;updateWebButton();
+      try{
+        setStatus('Checking published nameservers...');
+        const u=new URL('/api/lookup',location.origin);u.searchParams.set('name',domain);u.searchParams.set('mode','health');
+        const response=await fetch(u),data=await response.json();if(!response.ok)throw Error(data.error||'NS lookup failed.');if(sequence!==lookupSequence)return;
+        data.reports=[];renderHealth(data);
+        for(const server of data.servers){
+          setStatus('Checking nameservers: '+data.reports.length+' of '+data.servers.length+' — '+server);
+          u.searchParams.set('mode','health-server');u.searchParams.set('server',server);
+          try{const r=await fetch(u),report=await r.json();if(!r.ok)throw Error(report.error||'Nameserver check failed');data.reports.push(report);}
+          catch(e){data.reports.push({server,results:[{type:'SOA',error:e.message}]});}
+          if(sequence!==lookupSequence)return;renderHealth(data);
+        }
+        healthCache.set(domain,data);setStatus('Done. DNS Health checks complete; review differences and incomplete checks below.');
+      }catch(e){if(sequence===lookupSequence)setStatus(e.message||'DNS Health failed.');}
+      finally{webBusy=false;updateWebButton();}
+    }
+    healthButton.addEventListener('click',()=>runHealth());
+    document.getElementById('refresh-health').addEventListener('click',()=>runHealth(true));
 
     const HISTORY_KEY="dns-tools-history-v1";
     let recentScans=[],historyMessage="Saved in this browser. Select a scan to restore it without rescanning.";
@@ -1851,8 +1919,8 @@ function manualQueryName(query,zone){
   if(q.length>253||!q.split('.').every(x=>/^[a-z0-9_*\-]{1,63}$/.test(x)))throw Error('Enter a valid query name. Use a trailing dot for an absolute name.');
   return q;
 }
-function encodeDnsQuery(name,type,id){
-  const labels=name.split('.'),bytes=[id>>8,id&255,1,0,0,1,0,0,0,0,0,0];
+function encodeDnsQuery(name,type,id,recursive=true){
+  const labels=name.split('.'),bytes=[id>>8,id&255,recursive?1:0,0,0,1,0,0,0,0,0,0];
   for(const l of labels)bytes.push(l.length,...Array.from(l,c=>c.charCodeAt(0)));
   bytes.push(0,type>>8,type&255,0,1);return new Uint8Array(bytes);
 }
@@ -1895,7 +1963,7 @@ function decodeDnsPacket(bytes,id,name,type){
     }
   }return result;
 }
-async function manualDnsLookup(server,query,zone,type){
+async function manualDnsLookup(server,query,zone,type,recursive=true){
   server=String(server||'').trim().toLowerCase();type=String(type||'A').toUpperCase();
   if(!Object.hasOwn(MANUAL_TYPES,type))throw Error('Unsupported record type.');
   const name=manualQueryName(query,zone);let address=server;
@@ -1906,7 +1974,7 @@ async function manualDnsLookup(server,query,zone,type){
     if(!addresses.length||addresses.some(ip=>!publicWebAddress(ip)))throw Error('DNS server must resolve to public addresses.');address=addresses[0];
   }
   if(!publicWebAddress(address))throw Error('Use a public DNS server. Private/LAN DNS servers cannot be reached from this app.');
-  const id=crypto.getRandomValues(new Uint16Array(1))[0],packet=encodeDnsQuery(name,MANUAL_TYPES[type],id),start=Date.now();
+  const id=crypto.getRandomValues(new Uint16Array(1))[0],packet=encodeDnsQuery(name,MANUAL_TYPES[type],id,recursive),start=Date.now();
   // Cloudflare resolver addresses use that same resolver's HTTPS service because
   // Worker TCP connections to Cloudflare-owned IP ranges can be prohibited.
   if(['1.1.1.1','1.0.0.1'].includes(address)){
@@ -1954,6 +2022,69 @@ async function manualLookupPage(){
   document.getElementById('copy-manual').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(out.textContent);status.textContent='Copied.';}catch{status.textContent='Select and copy the result text manually.';}});
   </script>`;
   return new Response(base.replace(/<main>[\s\S]*?<\/main>/,()=>main).replace(/<script>[\s\S]*?<\/script>/,()=>script),{headers:noStoreHeaders('text/html')});
+}
+
+async function analyzeSpf(domain){
+  const report={records:[],issues:[],lookupTerms:0,complete:true},cache=new Map();let requests=0,visits=0;const deadline=Date.now()+40000;
+  const issue=(level,text)=>report.issues.push({level,text});
+  async function walk(name,path=[]){
+    name=name.toLowerCase().replace(/\.$/,'');
+    if(path.includes(name)){issue('ERROR','Include/redirect loop: '+[...path,name].join(' → '));return;}
+    if(path.length>=10||requests>=20||++visits>60||Date.now()>=deadline){report.complete=false;issue('INCOMPLETE','Expansion limit reached at '+name);return;}
+    let response;
+    try{if(!cache.has(name)){requests++;cache.set(name,await lookupDns(name,'TXT',Math.max(1,Math.min(8000,deadline-Date.now()))));}response=cache.get(name);}catch(e){report.complete=false;issue('INCOMPLETE',name+': '+e.message);return;}
+    if(![0,3].includes(response.Status)){report.complete=false;issue('INCOMPLETE',name+': TXT '+response.StatusText);return;}
+    const records=textRecords(response.Answer||[]).filter(s=>/^v=spf1(?:\s|$)/i.test(s));
+    report.records.push({name,depth:path.length,records});
+    if(records.length!==1){issue('ERROR',name+': '+(records.length?'Multiple SPF TXT records':'No SPF TXT record'));return;}
+    const terms=records[0].split(/ +/).slice(1),modifiers=new Set();let terminal=false,redirect=null;
+    for(const term of terms){
+      if(!term)continue;
+      const modifier=term.match(/^([a-z][a-z0-9_.-]*)=(.*)$/i);
+      if(modifier){const key=modifier[1].toLowerCase();if(modifiers.has(key))issue('ERROR',name+': duplicate '+key+' modifier');modifiers.add(key);
+        if(!modifier[2])issue('ERROR',name+': empty '+key+' modifier');if(key==='redirect')redirect=modifier[2];continue;}
+      const match=term.match(/^([+?~-]?)(all|include|a|mx|ptr|ip4|ip6|exists)(.*)$/i);
+      if(!match){issue('ERROR',name+': unrecognized mechanism '+term);continue;}
+      const [,qualifier,raw,suffix]=match,kind=raw.toLowerCase();
+      if(terminal){issue('WARNING',name+': '+term+' is unreachable after all');continue;}
+      if(kind==='all'){if(suffix)issue('ERROR',name+': invalid all syntax');if(!qualifier||qualifier==='+')issue('WARNING',name+': +all authorizes every sender');terminal=true;continue;}
+      if(['ip4','ip6'].includes(kind)){
+        const m=suffix.match(/^:([^/]+)(?:\/(\d+))?$/);try{if(!m)throw Error();const reverse=reverseDnsName(m[1]);if((kind==='ip4')!==reverse.endsWith('in-addr.arpa')||m[2]!==undefined&&Number(m[2])>(kind==='ip4'?32:128))throw Error();}catch{issue('ERROR',name+': invalid address/CIDR '+term);}continue;
+      }
+      report.lookupTerms++;
+      if(kind==='ptr')issue('WARNING',name+': ptr mechanism is discouraged');
+      let target=null;
+      if(['include','exists'].includes(kind)){if(!suffix.startsWith(':')||suffix.length===1){issue('ERROR',name+': missing target in '+term);continue;}target=suffix.slice(1);}
+      else if(!/^(?::[^/]+)?(?:\/\d{1,3})?(?:\/\/\d{1,3})?$/.test(suffix)||(kind==='ptr'&&suffix.includes('/')))issue('ERROR',name+': invalid mechanism syntax '+term);
+      else {const cidr=suffix.match(/^(?::[^/]+)?(?:\/(\d+))?(?:\/\/(\d+))?$/);if(cidr&&(Number(cidr[1]||0)>32||Number(cidr[2]||0)>128))issue('ERROR',name+': invalid CIDR '+term);}
+      if((target||suffix).includes('%')){report.complete=false;issue('INCOMPLETE',name+': sender-dependent macro not expanded: '+term);continue;}
+      if(target&&!normalizeName(target)){issue('ERROR',name+': invalid target '+target);continue;}
+      if(kind==='include')await walk(target,[...path,name]);
+    }
+    if(redirect){if(terminal)issue('WARNING',name+': redirect is ignored because all is present');else{report.lookupTerms++;if(redirect.includes('%')){report.complete=false;issue('INCOMPLETE',name+': macro redirect not expanded');}else if(!normalizeName(redirect))issue('ERROR',name+': invalid redirect');else await walk(redirect,[...path,name]);}}
+    if(!terminal&&!redirect)issue('WARNING',name+': no all or redirect; unmatched senders default to neutral');
+  }
+  await walk(domain);
+  if(report.lookupTerms>10)issue('WARNING','Expanded policy has '+report.lookupTerms+' DNS-triggering terms. A path evaluating more than 10 produces permerror; actual evaluation depends on the sender and earlier matches.');
+  report.note='Static policy analysis, not a sender-IP SPF pass/fail test. Counts include a, mx, ptr, exists, include and redirect across expanded branches; initial TXT fetch is excluded. Void lookups, address expansion limits and sender-dependent paths are not evaluated. No clean bill of health is implied.';
+  return report;
+}
+async function dnsHealthInventory(domain){
+ const response=await lookupDns(domain,'NS');
+ if(response.Status!==0)throw Error('NS discovery failed: '+response.StatusText);
+ const servers=[...new Set(answerValues(response,'NS').map(a=>a.value.toLowerCase().replace(/\.$/,'')))];
+ if(!servers.length)throw Error('No NS records at this name. Enter the zone apex.');
+ return {domain,servers:servers.slice(0,16),limited:servers.length>16};
+}
+async function dnsHealthServer(domain,server){
+ if(!isDomainHostname(server,server))throw Error('Invalid nameserver.');
+ const results=[];
+ // Sequential checks bound sockets and avoid bursts at the authoritative server.
+ for(const type of ['SOA','NS','MX','TXT','A','AAAA']){
+   try{const r=await manualDnsLookup(server,domain+'.','',type,false);results.push({type,...r});}
+   catch(e){results.push({type,error:e.message});break;}
+ }
+ return {server,results};
 }
 
 export default {
