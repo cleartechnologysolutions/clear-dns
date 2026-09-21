@@ -1,5 +1,23 @@
 # DNS Tools
 
+## Build 22 — reverse DNS from Standard Records
+
+Reverse DNS / PTR unlocks after Standard Records completes. It uses the saved
+A and AAAA answers (including wildcard matches), deduplicates IP addresses, and
+queries PTR through the existing DNS-over-HTTPS resolver. IPv6 spellings are
+normalized to the same reverse name. Each result lists the IP, PTR answers/TTLs
+and the scanned hostnames that returned it. Empty answers and lookup failures
+are distinguished. Discovery is never repeated. Batches contain at most 20 IPs
+with the existing six-query concurrency limit.
+
+Completed PTR results are cached and included in the five-domain browser
+history. Refresh beside the PTR heading explicitly checks again. A new Standard
+Records scan or certificate discovery retry invalidates PTR results.
+
+Validation: node test.mjs; node manual-test.mjs; node history-test.mjs;
+node ptr-test.mjs. These are network-mocked tests; deployment not performed.
+
+
 ## Build 21 — recent scans and DNS Lookup button
 
 Recent scans retains the five most recently completed distinct domains in
@@ -221,6 +239,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 21 beneath it.
+The page will read DNS Tools with Build 22 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs

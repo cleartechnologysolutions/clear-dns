@@ -1,3 +1,15 @@
+function reverseDnsName(value){
+  const ip=String(value||'').trim().toLowerCase();
+  if(/^\d+\.\d+\.\d+\.\d+$/.test(ip)){
+    const parts=ip.split('.');if(parts.some(p=>!/^\d{1,3}$/.test(p)||Number(p)>255))throw Error('Invalid IPv4 address.');
+    return parts.map(Number).reverse().join('.')+'.in-addr.arpa';
+  }
+  let canonical;try{canonical=new URL('http://['+ip+']/').hostname.slice(1,-1);}catch{throw Error('Invalid IP address.');}
+  const sides=canonical.split('::'),left=sides[0]?sides[0].split(':'):[],right=sides[1]?sides[1].split(':'):[];
+  const groups=sides.length===2?[...left,...Array(8-left.length-right.length).fill('0'),...right]:left;
+  if(groups.length!==8)throw Error('Invalid IPv6 address.');
+  return groups.map(g=>g.padStart(4,'0')).join('').split('').reverse().join('.')+'.ip6.arpa';
+}
 import { connect } from "cloudflare:sockets";
 
 const DNS_ENDPOINT = "https://cloudflare-dns.com/dns-query";
@@ -139,6 +151,7 @@ const DKIM_SELECTORS = ["selector1", "selector2", "google", "default"];
 const TYPE_CODES = {
   A: 1,
   NS: 2,
+  PTR: 12,
   CNAME: 5,
   SOA: 6,
   MX: 15,
@@ -586,6 +599,12 @@ async function apiResponse(request) {
       return Response.json(Object.fromEntries(entries), { headers: noStoreHeaders("application/json") });
     }
 
+    if(mode==="ptr"){
+      if(request.method!=="POST")return Response.json({error:"Use POST."},{status:405});
+      const raw=await request.text();if(raw.length>4096)return Response.json({error:"Batch too large."},{status:400});
+      let tasks;try{const {ips}=JSON.parse(raw);if(!Array.isArray(ips)||!ips.length||ips.length>20)throw Error();tasks=[...new Set(ips.map(reverseDnsName))].map(name=>({name,type:"PTR"}));}catch{return Response.json({error:"Provide 1–20 valid IP addresses."},{status:400});}
+      return Response.json({checks:await runDnsTasks(tasks)},{headers:noStoreHeaders("application/json")});
+    }
     if (mode === "mail") {
       const [mx, txt, dmarc] = await Promise.all([
         lookupDns(domain, "MX"),
@@ -974,7 +993,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 21</p>
+          <p class="brand-subtitle">Build 22</p>
         </div>
       </div>
     </header>
@@ -992,6 +1011,7 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
+            <button type="button" class="secondary" id="ptr" disabled title="Finish Standard Records first">Reverse DNS / PTR</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
@@ -1017,6 +1037,7 @@ function pageResponse() {
         <div class="result-head">
           <p class="result-title" id="result-title">Results</p>
           <div class="result-actions">
+            <button type="button" class="secondary" id="refresh-ptr" hidden aria-label="Refresh PTR records">↻ Refresh</button>
             <button type="button" class="secondary" id="retry-crt" hidden>Retry crt.sh only</button>
             <button type="button" class="secondary" id="rescan-standard" hidden title="Run Standard Records again" aria-label="Refresh Standard Records">↻ Refresh</button>
             <button type="button" class="secondary" id="rescan-web" hidden title="Check discovered web ports again" aria-label="Refresh web ports">↻ Refresh</button>
@@ -1035,6 +1056,7 @@ function pageResponse() {
     const retryCrtButton=document.getElementById("retry-crt");
     const progressBar = document.getElementById("scan-progress");
     const auditButton = document.getElementById("audit");
+    const ptrButton=document.getElementById("ptr"),refreshPtrButton=document.getElementById("refresh-ptr");
     const portsButton = document.getElementById("ports");
     const domainInfoButton = document.getElementById("domain-info");
     const rescanStandardButton=document.getElementById("rescan-standard");
@@ -1051,22 +1073,25 @@ function pageResponse() {
     let currentAudit = null, resultView="";
     function setResultView(view){
       resultView=view;
+      refreshPtrButton.hidden=view!=="ptr";
       rescanStandardButton.hidden=view!=="audit";
       rescanWebButton.hidden=view!=="web";
       updateWebButton();
     }
-    const standardCache=new Map(),webCache=new Map();
+    const standardCache=new Map(),webCache=new Map(),ptrCache=new Map();
     let savedAudit = null, discoveredWebHosts = [], webBusy = false, auditRunning = false;
     function updateWebButton(){
       const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
       retryCrtButton.hidden=!(resultView==="audit"&&ready&&savedAudit.data?.crtNote?.startsWith("crt.sh discovery incomplete"));
       retryCrtButton.disabled=webBusy||auditRunning;
+      ptrButton.disabled=refreshPtrButton.disabled=webBusy||auditRunning||!ready;
       portsButton.disabled=webBusy||auditRunning||!ready;
       for(const button of [domainInfoButton,mailButton,auditButton,rescanStandardButton])button.disabled=auditRunning||webBusy;
       rescanWebButton.disabled=webBusy||auditRunning||!ready;
       portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
       if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
+      else if(webBusy&&resultView==="ptr"){hint.textContent="Checking reverse DNS for IP addresses from the saved Standard Records scan.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
       else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
       else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
@@ -1372,6 +1397,70 @@ function decodeTxtPresentation(value) {
       }
     }
 
+function reverseDnsName(value){
+  const ip=String(value||'').trim().toLowerCase();
+  if(/^\\d+\\.\\d+\\.\\d+\\.\\d+$/.test(ip)){
+    const parts=ip.split('.');if(parts.some(p=>!/^\\d{1,3}$/.test(p)||Number(p)>255))throw Error('Invalid IPv4 address.');
+    return parts.map(Number).reverse().join('.')+'.in-addr.arpa';
+  }
+  let canonical;try{canonical=new URL('http://['+ip+']/').hostname.slice(1,-1);}catch{throw Error('Invalid IP address.');}
+  const sides=canonical.split('::'),left=sides[0]?sides[0].split(':'):[],right=sides[1]?sides[1].split(':'):[];
+  const groups=sides.length===2?[...left,...Array(8-left.length-right.length).fill('0'),...right]:left;
+  if(groups.length!==8)throw Error('Invalid IPv6 address.');
+  return groups.map(g=>g.padStart(4,'0')).join('').split('').reverse().join('.')+'.ip6.arpa';
+}
+    function ptrTargets(){
+      const targets=new Map();
+      for(const check of savedAudit?.data?.checks||[]){
+        if(!['A','AAAA'].includes(check.type))continue;
+        for(const answer of check.answers||[]){try{
+          const reverse=reverseDnsName(answer.value);
+          if(!targets.has(reverse))targets.set(reverse,{ip:answer.value,reverse,names:[]});
+          const names=targets.get(reverse).names;if(!names.includes(check.name))names.push(check.name);
+        }catch{}}
+      }
+      return [...targets.values()];
+    }
+    function renderPtr(data){
+      setResultView('ptr');resultTitle.textContent='Reverse DNS / PTR';
+      const lines=['REVERSE DNS / PTR','Domain: '+data.domain,'Checked: '+data.checked+' of '+data.total+' unique IP addresses',''];
+      for(const row of data.results){
+        lines.push(row.ip+' → '+(row.answers.length?row.answers.map(a=>a.value).join(', '):['NOERROR','NXDOMAIN'].includes(row.status)?'No PTR record found':'Lookup incomplete: '+row.status));
+        lines.push('  Found on: '+row.names.join(', '));
+        for(const answer of row.answers)lines.push('  TTL '+answer.ttl+'  '+answer.value);
+        if(row.error)lines.push('  '+row.error);lines.push('');
+      }
+      if(!data.total)lines.push('No A or AAAA addresses were found in the saved scan.');
+      lines.push('Uses the saved A/AAAA answers, including wildcard matches; each unique IP is checked once.','PTR records are managed by the IP owner and may not match the scanned domain.');
+      lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
+    }
+    async function runPtrCheck(force=false){
+      clearTimeout(autoScanTimer);if(auditRunning||webBusy)return;
+      if(!savedAudit?.data||savedAudit.domain!==cleanDomain(domainInput.value).toLowerCase()){setStatus('Finish Standard Records for this domain first.');return;}
+      const domain=savedAudit.domain;
+      if(!force&&ptrCache.has(domain)){renderPtr(ptrCache.get(domain));setStatus('Done. Showing saved PTR results. Use Refresh to check again.');return;}
+      const targets=ptrTargets(),data={domain,total:targets.length,checked:0,results:[]},sequence=++lookupSequence;
+      webBusy=true;renderPtr(data);updateWebButton();
+      try{
+        for(let i=0;i<targets.length;i+=20){
+          setStatus('Checking PTR records: '+i+' of '+targets.length+' unique IPs...');
+          const batch=targets.slice(i,i+20);let rows;
+          try{
+            const url=new URL('/api/lookup',location.origin);url.searchParams.set('name',domain);url.searchParams.set('mode','ptr');
+            const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ips:batch.map(t=>t.ip)})});
+            const result=await response.json();if(!response.ok)throw Error(result.error||'PTR query failed.');rows=result.checks;
+          }catch(error){rows=batch.map(t=>({name:t.reverse,status:'ERROR',answers:[],error:error.message}));}
+          if(sequence!==lookupSequence)return;
+          data.results.push(...batch.map(t=>({...t,...(rows.find(r=>r.name===t.reverse)||{status:'ERROR',answers:[],error:'Missing lookup result.'})})));
+          data.checked+=batch.length;renderPtr(data);
+        }
+        ptrCache.set(domain,data);const entry=recentScans.find(s=>s.domain===domain);if(entry){entry.ptr=data;persistHistory();}
+        setStatus('Done. PTR checks complete. Standard Records were not rescanned.');
+      }finally{webBusy=false;updateWebButton();}
+    }
+    ptrButton.addEventListener('click',()=>runPtrCheck());
+    refreshPtrButton.addEventListener('click',()=>runPtrCheck(true));
+
     function renderWeb(data) {
       setResultView("web");
       resultTitle.textContent="Web ports · 80 / 443";
@@ -1558,7 +1647,7 @@ function decodeTxtPresentation(value) {
       if(mode==="audit")activeScanDomain=domain.toLowerCase();
       currentAudit = null;
       auditRunning=mode==="audit";updateWebButton();
-      if(mode==="audit"){standardCache.delete(domain);webCache.delete(domain);savedAudit=null;discoveredWebHosts=[];updateWebButton();}
+      if(mode==="audit"){standardCache.delete(domain);webCache.delete(domain);ptrCache.delete(domain);savedAudit=null;discoveredWebHosts=[];updateWebButton();}
       showWildcards = false;
 
       const url = new URL(location.href);
@@ -1626,6 +1715,7 @@ function decodeTxtPresentation(value) {
       savedAudit={domain,hosts:discoveredWebHosts.slice(),data};
       standardCache.set(domain,savedAudit);
       if(savedAudit.hosts.join("|")!==previousHosts)webCache.delete(domain);
+      ptrCache.delete(domain);
       rememberScan(false);
       updateWebButton();
       setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
@@ -1692,7 +1782,7 @@ function decodeTxtPresentation(value) {
     function rememberScan(fresh=true){
       if(!savedAudit?.data)return;
       const domain=savedAudit.domain,old=recentScans.find(s=>s.domain===domain);
-      const entry={domain,scannedAt:fresh?new Date().toISOString():(old?.scannedAt||new Date().toISOString()),hosts:savedAudit.hosts.slice(),data:JSON.parse(JSON.stringify(savedAudit.data)),web:webCache.get(domain)||null};
+      const entry={domain,scannedAt:fresh?new Date().toISOString():(old?.scannedAt||new Date().toISOString()),hosts:savedAudit.hosts.slice(),data:JSON.parse(JSON.stringify(savedAudit.data)),web:webCache.get(domain)||null,ptr:ptrCache.get(domain)||null};
       recentScans=[entry,...recentScans.filter(s=>s.domain!==domain)].slice(0,5);persistHistory();
     }
     function loadHistory(){
@@ -1701,7 +1791,7 @@ function decodeTxtPresentation(value) {
         if(raw?.version===1&&Array.isArray(raw.scans)){
           for(const s of raw.scans.slice(0,5)){
             try{if(typeof s.domain!=="string"||!Number.isFinite(Date.parse(s.scannedAt))||s.data?.domain!==s.domain||!Array.isArray(s.hosts)||!Array.isArray(s.data.checks)||s.data.checks.length>10000)continue;
-              const data=unpackAudit(s.data);recentScans.push({...s,data});standardCache.set(s.domain,{domain:s.domain,hosts:s.hosts,data});if(s.web?.domain===s.domain&&Array.isArray(s.web.results))webCache.set(s.domain,s.web);
+              const data=unpackAudit(s.data);recentScans.push({...s,data});if(s.ptr?.domain===s.domain&&Array.isArray(s.ptr.results))ptrCache.set(s.domain,s.ptr);standardCache.set(s.domain,{domain:s.domain,hosts:s.hosts,data});if(s.web?.domain===s.domain&&Array.isArray(s.web.results))webCache.set(s.domain,s.web);
             }catch{}
           }
         }
@@ -1713,6 +1803,7 @@ function decodeTxtPresentation(value) {
       const entry=recentScans[Number(button.dataset.scan)];if(!entry)return;
       clearTimeout(autoScanTimer);++lookupSequence;domainInput.value=entry.domain;activeScanDomain=entry.domain;
       const data=JSON.parse(JSON.stringify(entry.data));savedAudit={domain:entry.domain,hosts:entry.hosts.slice(),data};standardCache.set(entry.domain,savedAudit);
+      if(entry.ptr)ptrCache.set(entry.domain,entry.ptr);else ptrCache.delete(entry.domain);
       if(entry.web)webCache.set(entry.domain,entry.web);else webCache.delete(entry.domain);
       showWildcards=false;renderAudit(data);updateWebButton();
       const url=new URL(location.href);url.searchParams.set("domain",entry.domain);history.replaceState(null,"",url);
@@ -1720,7 +1811,7 @@ function decodeTxtPresentation(value) {
     });
     document.getElementById("clear-history").addEventListener("click",()=>{
       if(auditRunning||webBusy)return;
-      try{localStorage.removeItem(HISTORY_KEY);recentScans=[];standardCache.clear();webCache.clear();historyMessage="History cleared. Current results remain visible.";}
+      try{localStorage.removeItem(HISTORY_KEY);recentScans=[];standardCache.clear();webCache.clear();ptrCache.clear();historyMessage="History cleared. Current results remain visible.";}
       catch{historyMessage="Could not clear browser storage. Allow storage for this site and try again.";}
       renderHistory();updateWebButton();
     });
