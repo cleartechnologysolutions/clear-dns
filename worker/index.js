@@ -183,20 +183,35 @@ function normalizeType(value) {
   return TYPE_CODES[type] ? type : "A";
 }
 
+function decodeTxtPresentation(value) {
+  const raw=String(value||'').trim();
+  if(!raw.startsWith('"'))return raw;
+  const chunks=[];let i=0;
+  while(i<raw.length){
+    while(/\s/.test(raw[i]||'')&&i<raw.length)i++;
+    if(i===raw.length)break;
+    if(raw[i++]!=='"')return raw;
+    let chunk='',closed=false;
+    while(i<raw.length){let c=raw[i++];if(c==='"'){closed=true;break;}
+      if(c==='\\'&&i<raw.length){const digits=raw.slice(i,i+3);if(/^\d{3}$/.test(digits)){chunk+=String.fromCharCode(Number(digits));i+=3;}else chunk+=raw[i++];}
+      else chunk+=c;
+    }
+    if(!closed)return raw;chunks.push(chunk);
+  }
+  return chunks.join('');
+}
 function textRecords(records) {
-  return records
-    .filter((record) => record.type === TYPE_CODES.TXT)
-    .map((record) => String(record.data || "").replace(/^"|"$/g, "").replaceAll('" "', ""));
+  return records.filter(record=>record.type===TYPE_CODES.TXT).map(record=>decodeTxtPresentation(record.data));
 }
 
 function summarizeMail(domain, results) {
   const mx = results.MX?.Answer || [];
   const txt = textRecords(results.TXT?.Answer || []);
   const dmarcTxt = textRecords(results.DMARC?.Answer || []);
-  const spf = txt.filter((record) => record.toLowerCase().startsWith("v=spf1"));
+  const spf = txt.filter((record) => /^v=spf1(?:\s|$)/i.test(record));
   const dmarc = dmarcTxt.find((record) => record.toLowerCase().startsWith("v=dmarc1"));
   const mxSummary = mx.length ? `${mx.length} MX record${mx.length === 1 ? "" : "s"} found` : "No MX records found";
-  const spfSummary = spf.length === 1 ? "SPF found" : spf.length > 1 ? "Multiple SPF records found" : "No SPF record found";
+  let spfSummary = spf.length === 1 ? "SPF found" : spf.length > 1 ? "Multiple SPF records found" : "No SPF record found";
   let dmarcSummary = "No DMARC record found";
 
   if (dmarc) {
@@ -211,6 +226,8 @@ function summarizeMail(domain, results) {
   if (!dmarc) warnings.push("No DMARC record.");
   if (dmarc && /;\s*p=none/i.test(dmarc)) warnings.push("DMARC policy is p=none.");
 
+  const txtFailed=results.TXT?.Status!==undefined&&![0,3].includes(results.TXT.Status);
+  if(txtFailed){spfSummary="SPF lookup incomplete — TXT query returned "+(results.TXT.StatusText||STATUS_TEXT[results.TXT.Status]||results.TXT.Status);const i=warnings.indexOf("No SPF record.");if(i>=0)warnings.splice(i,1);warnings.push("Could not determine SPF. Retry the TXT lookup.");}
   return {
     domain,
     mx: mxSummary,
@@ -955,14 +972,15 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 19</p>
+          <p class="brand-subtitle">Build 20</p>
         </div>
       </div>
     </header>
 
     <section class="layout">
       <aside class="panel side">
-        <h1>DNS lookup</h1>
+        <h1>DNS tools</h1>
+        <p><a href="/dns-lookup">Open DNS Lookup →</a></p>
         <p>Check common DNS records, TXT records, MX, DMARC, and basic mail health from one simple page.</p>
 
         <form id="lookup-form">
@@ -1119,12 +1137,30 @@ function pageResponse() {
       results.innerHTML = '<div class="console-wrap"><pre class="console-output">' + escapeText(lastText) + '</pre></div>';
     }
 
+function decodeTxtPresentation(value) {
+  const raw=String(value||'').trim();
+  if(!raw.startsWith('"'))return raw;
+  const chunks=[];let i=0;
+  while(i<raw.length){
+    while(/\\s/.test(raw[i]||'')&&i<raw.length)i++;
+    if(i===raw.length)break;
+    if(raw[i++]!=='"')return raw;
+    let chunk='',closed=false;
+    while(i<raw.length){let c=raw[i++];if(c==='"'){closed=true;break;}
+      if(c==='\\\\'&&i<raw.length){const digits=raw.slice(i,i+3);if(/^\\d{3}$/.test(digits)){chunk+=String.fromCharCode(Number(digits));i+=3;}else chunk+=raw[i++];}
+      else chunk+=c;
+    }
+    if(!closed)return raw;chunks.push(chunk);
+  }
+  return chunks.join('');
+}
+
     function renderMail(data) {
       setResultView("mail");
       resultTitle.textContent="Mail check";
       const lines=["MAIL CHECK", "PRIMARY DOMAIN: "+data.domain, "", data.mx, data.spf, data.dmarc, ""];
       for(const warning of data.warnings)lines.push("NOTE: "+warning);
-      for(const [title,records] of [["MX",data.records.mx],["SPF",data.records.spf],["TXT",data.records.txt||[]],["DMARC",data.records.dmarc]]){
+      for(const [title,records] of [["MX",data.records.mx],["SPF (TXT)",data.records.spf],["TXT",data.records.txt||[]],["DMARC",data.records.dmarc]]){
         if(!records.length)continue;
         lines.push("",title+" RECORDS","-".repeat(title.length+8),...records);
       }
@@ -1140,7 +1176,7 @@ function pageResponse() {
           if(!positive.length)continue;
           found++;lines.push(host,"-".repeat(host.length));
           for(const c of positive)for(const answer of c.answers){
-            const label=c.name.startsWith("_dmarc.")?"DMARC TXT":c.type==="TXT"&&answer.value.replaceAll('"', '').trim().toLowerCase().startsWith("v=spf1")?"SPF TXT":c.type;
+            const label=c.name.startsWith("_dmarc.")?"DMARC TXT":c.type==="TXT"&&/^v=spf1(?:\\s|$)/i.test(decodeTxtPresentation(answer.value))?"SPF TXT":c.type;
             lines.push(c.name+"  "+label+"  TTL "+answer.ttl+"  "+answer.value);
           }
           lines.push("");
@@ -1652,10 +1688,127 @@ function pageResponse() {
   });
 }
 
+// Independent manual lookup: DNS over TCP to the selected public server.
+const MANUAL_TYPES={...TYPE_CODES,PTR:12,SRV:33,DS:43,DNSKEY:48,TLSA:52,ANY:255};
+function manualQueryName(query,zone){
+  let q=String(query||'@').trim().toLowerCase(),z=String(zone||'').trim().toLowerCase().replace(/\.$/,'');
+  if(q==='@'){if(!z)throw Error('Enter a domain for @.');q=z;}
+  else if(q.endsWith('.'))q=q.slice(0,-1);
+  else if(z&&q!==z&&!q.endsWith('.'+z))q+='.'+z;
+  if(q.length>253||!q.split('.').every(x=>/^[a-z0-9_*\-]{1,63}$/.test(x)))throw Error('Enter a valid query name. Use a trailing dot for an absolute name.');
+  return q;
+}
+function encodeDnsQuery(name,type,id){
+  const labels=name.split('.'),bytes=[id>>8,id&255,1,0,0,1,0,0,0,0,0,0];
+  for(const l of labels)bytes.push(l.length,...Array.from(l,c=>c.charCodeAt(0)));
+  bytes.push(0,type>>8,type&255,0,1);return new Uint8Array(bytes);
+}
+function decodeDnsPacket(bytes,id,name,type){
+  const d=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  function need(p,n){if(p<0||p+n>bytes.length)throw Error('Truncated DNS response.');}
+  function u16(p){need(p,2);return d.getUint16(p);}
+  function u32(p){need(p,4);return d.getUint32(p);}
+  function dn(start){let p=start,end=null,labels=[],seen=new Set();
+    for(let i=0;i<128;i++){
+      need(p,1);if(seen.has(p))throw Error('Invalid DNS compression loop.');seen.add(p);
+      const n=bytes[p++];if(!n)return {text:labels.join('.')+'.',end:end??p};
+      if((n&192)===192){need(p,1);end??=p+1;p=((n&63)<<8)|bytes[p];continue;}
+      if(n>63)throw Error('Invalid DNS label.');need(p,n);labels.push(String.fromCharCode(...bytes.slice(p,p+n)));p+=n;
+    }throw Error('DNS name exceeds limits.');
+  }
+  need(0,12);if(u16(0)!==id||!(u16(2)&0x8000)||((u16(2)>>11)&15))throw Error('Unexpected DNS response.');
+  let p=12;if(u16(4)!==1)throw Error('Unexpected DNS question count.');
+  const question=dn(p);p=question.end;
+  if(question.text.toLowerCase()!==name+'.'||u16(p)!==type||u16(p+2)!==1)throw Error('DNS question mismatch.');p+=4;
+  const result={status:STATUS_TEXT[u16(2)&15]||'RCODE '+(u16(2)&15),authoritative:!!(u16(2)&1024),truncated:!!(u16(2)&512),answers:[],authority:[],additional:[]};
+  const hex=(a,b)=>Array.from(bytes.slice(a,b),x=>x.toString(16).padStart(2,'0')).join('');
+  const text=(a,b)=>new TextDecoder().decode(bytes.slice(a,b));
+  for(const [section,count] of [['answers',u16(6)],['authority',u16(8)],['additional',u16(10)]]){
+    if(count>2048)throw Error('Too many DNS records.');
+    for(let i=0;i<count;i++){
+      const owner=dn(p);p=owner.end;need(p,10);const t=u16(p),ttl=u32(p+4),len=u16(p+8);p+=10;const start=p,end=p+len;need(p,len);
+      let value;
+      const rname=at=>{const n=dn(at);if(n.end>end)throw Error('Invalid DNS record length.');return n;};
+      if(t===1&&len===4)value=Array.from(bytes.slice(p,end)).join('.');
+      else if(t===28&&len===16)value=Array.from({length:8},(_,i)=>u16(p+i*2).toString(16)).join(':');
+      else if([2,5,12].includes(t))value=rname(p).text;
+      else if(t===15&&len>=3)value=u16(p)+' '+rname(p+2).text;
+      else if(t===33&&len>=7)value=[u16(p),u16(p+2),u16(p+4),rname(p+6).text].join(' ');
+      else if(t===6){const a=rname(p),b=rname(a.end);if(b.end+20>end)throw Error('Invalid SOA.');value=[a.text,b.text,...Array.from({length:5},(_,i)=>u32(b.end+i*4))].join(' ');}
+      else if(t===16){const parts=[];while(p<end){const n=bytes[p++];if(p+n>end)throw Error('Invalid TXT record.');parts.push(JSON.stringify(text(p,p+n)));p+=n;}value=parts.join(' ');}
+      else if(t===257&&len>=2){const n=bytes[p+1];if(p+2+n>end)throw Error('Invalid CAA.');value=bytes[p]+' '+text(p+2,p+2+n)+' '+JSON.stringify(text(p+2+n,end));}
+      else value='HEX '+hex(start,end);
+      result[section].push({name:owner.text,type:Object.keys(MANUAL_TYPES).find(k=>MANUAL_TYPES[k]===t)||'TYPE'+t,ttl,value});p=end;
+    }
+  }return result;
+}
+async function manualDnsLookup(server,query,zone,type){
+  server=String(server||'').trim().toLowerCase();type=String(type||'A').toUpperCase();
+  if(!Object.hasOwn(MANUAL_TYPES,type))throw Error('Unsupported record type.');
+  const name=manualQueryName(query,zone);let address=server;
+  if(server.includes(':')){try{address=new URL('http://['+server.replace(/^\[|\]$/g,'')+']/').hostname.slice(1,-1);}catch{throw Error('Invalid DNS server IPv6 address.');}}
+  else if(!/^\d+\.\d+\.\d+\.\d+$/.test(server)){
+    if(!isDomainHostname(server,server))throw Error('Enter a public DNS server IP or hostname.');
+    const r=await lookupDns(server,'A');const addresses=answerValues(r,'A').map(a=>a.value);
+    if(!addresses.length||addresses.some(ip=>!publicWebAddress(ip)))throw Error('DNS server must resolve to public addresses.');address=addresses[0];
+  }
+  if(!publicWebAddress(address))throw Error('Use a public DNS server. Private/LAN DNS servers cannot be reached from this app.');
+  const id=crypto.getRandomValues(new Uint16Array(1))[0],packet=encodeDnsQuery(name,MANUAL_TYPES[type],id),start=Date.now();
+  // Cloudflare resolver addresses use that same resolver's HTTPS service because
+  // Worker TCP connections to Cloudflare-owned IP ranges can be prohibited.
+  if(['1.1.1.1','1.0.0.1'].includes(address)){
+    const c=new AbortController(),timer=setTimeout(()=>c.abort(),10000);
+    try{const r=await fetch('https://'+address+'/dns-query',{method:'POST',headers:{'content-type':'application/dns-message',accept:'application/dns-message'},body:packet,signal:c.signal,redirect:'manual'});
+      if(!r.ok)throw Error('Selected resolver returned HTTP '+r.status);const reader=r.body.getReader();let bytes=new Uint8Array(0);try{while(true){const {done,value}=await reader.read();if(done)break;if(bytes.length+value.length>65535){await reader.cancel();throw Error('DNS response too large.');}const joined=new Uint8Array(bytes.length+value.length);joined.set(bytes);joined.set(value,bytes.length);bytes=joined;}}finally{reader.releaseLock();}return {server,address,name,type,transport:'DNS over HTTPS',ms:Date.now()-start,...decodeDnsPacket(bytes,id,name,MANUAL_TYPES[type])};
+    }finally{clearTimeout(timer);}
+  }
+  let socket,timer,reader,writer;
+  try{
+    const job=(async()=>{
+      socket=connect({hostname:address,port:53});socket.closed.catch(()=>{});await socket.opened;
+      writer=socket.writable.getWriter();reader=socket.readable.getReader();const frame=new Uint8Array(packet.length+2);frame[0]=packet.length>>8;frame[1]=packet.length&255;frame.set(packet,2);await writer.write(frame);
+      let data=new Uint8Array(0),length=null;
+      while(length===null||data.length<length+2){const {done,value}=await reader.read();if(done)throw Error('DNS server closed before sending a complete answer.');if(data.length+value.length>65537)throw Error('DNS response too large.');const next=new Uint8Array(data.length+value.length);next.set(data);next.set(value,data.length);data=next;if(data.length>=2){length=(data[0]<<8)|data[1];if(length<12)throw Error('Invalid DNS response length.');}}
+      return {server,address,name,type,transport:'DNS over TCP :53',ms:Date.now()-start,...decodeDnsPacket(data.slice(2,length+2),id,name,MANUAL_TYPES[type])};
+    })();
+    return await Promise.race([job,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('DNS server timed out after 10 seconds. TCP port 53 may be blocked.')),10000);})]);
+  }finally{clearTimeout(timer);if(socket){try{await socket.close();}catch{}}try{reader?.releaseLock();writer?.releaseLock();}catch{}}
+}
+async function manualLookupApi(request){
+  try{const q=new URL(request.url).searchParams;return Response.json(await manualDnsLookup(q.get('server'),q.get('query'),q.get('zone'),q.get('type')),{headers:noStoreHeaders('application/json')});}
+  catch(e){return Response.json({error:e.message||'DNS lookup failed.'},{status:502,headers:noStoreHeaders('application/json')});}
+}
+async function manualLookupPage(){
+  const base=await pageResponse().text();
+  const main=`<main><div class="brand"><h1>DNS Lookup</h1><p><a href="/">← Back to Standard Records</a></p></div>
+  <section class="panel" style="padding:24px;margin-top:24px">
+  <form id="manual-form"><label for="server">DNS server — public IP or hostname</label><input id="server" value="1.1.1.1" required>
+  <label for="zone">Domain / zone (needed for @ or relative names)</label><input id="zone" placeholder="example.com">
+  <label for="query">Query — @, www, _dmarc, or a full name ending in a dot</label><input id="query" value="@" required>
+  <label for="record-type">Record type</label><select id="record-type">${Object.keys(MANUAL_TYPES).map(t=>'<option>'+t+'</option>').join('')}</select>
+  <p>Queries run from the cloud. Custom servers must accept TCP port 53. Cloudflare 1.1.1.1 / 1.0.0.1 use DNS over HTTPS. ANY may return limited results; it is not a zone transfer.</p>
+  <button id="submit-lookup">Look up</button></form></section>
+  <section class="panel" style="margin-top:24px"><div class="result-head"><p>DNS answer</p><button id="copy-manual" type="button">Copy results</button></div><p id="manual-status" role="status" style="padding:0 20px">Ready.</p><pre id="manual-output" class="console-output" style="overflow:auto;padding:20px">Enter a query to begin.</pre></section></main>`;
+  const script=`<script>
+  const form=document.getElementById('manual-form'),out=document.getElementById('manual-output'),status=document.getElementById('manual-status'),button=document.getElementById('submit-lookup');
+  form.addEventListener('submit',async e=>{e.preventDefault();button.disabled=true;status.textContent='Querying selected DNS server...';try{
+    const q=new URLSearchParams();for(const id of ['server','zone','query'])q.set(id,document.getElementById(id).value);q.set('type',document.getElementById('record-type').value);
+    const r=await fetch('/api/manual-dns?'+q),d=await r.json();if(!r.ok)throw Error(d.error);
+    const lines=['DNS LOOKUP','Server: '+d.server+' ('+d.address+')','Transport: '+d.transport,'Query: '+d.name+' '+d.type,'Status: '+d.status,'Authoritative: '+d.authoritative,'Truncated: '+d.truncated,'Time: '+d.ms+' ms'];
+    for(const key of ['answers','authority','additional']){lines.push('',key.toUpperCase());for(const row of d[key])lines.push(row.name+'  '+row.ttl+'  '+row.type+'  '+row.value);if(!d[key].length)lines.push('(none)');}
+    out.textContent=lines.join('\\n');status.textContent='Done.';
+  }catch(e){status.textContent=e.message;out.textContent='Lookup failed; no answer was obtained.';}finally{button.disabled=false;}});
+  document.getElementById('copy-manual').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(out.textContent);status.textContent='Copied.';}catch{status.textContent='Select and copy the result text manually.';}});
+  </script>`;
+  return new Response(base.replace(/<main>[\s\S]*?<\/main>/,()=>main).replace(/<script>[\s\S]*?<\/script>/,()=>script),{headers:noStoreHeaders('text/html')});
+}
+
 export default {
   fetch(request) {
     const url = new URL(request.url);
 
+    if(url.pathname==="/dns-lookup")return manualLookupPage();
+    if(url.pathname==="/api/manual-dns")return manualLookupApi(request);
     if (url.pathname === "/api/lookup" || url.pathname === "/json") {
       return apiResponse(request);
     }

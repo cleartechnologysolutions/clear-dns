@@ -1,5 +1,32 @@
 # DNS Tools
 
+## Build 20 — manual DNS lookup and SPF TXT handling
+
+Open DNS Lookup links to /dns-lookup, an independent form which does not start
+Standard Records. Choose a public DNS server IP/hostname and record type. Domain
+sets the zone: @ queries its apex; relative names are appended to it; a trailing
+dot makes a query absolute. Leave Domain blank to enter a full query directly.
+Custom servers are queried over TCP port 53 with a 10-second deadline. The
+selected server is never silently replaced. Cloudflare 1.1.1.1 / 1.0.0.1 use
+their own DNS-over-HTTPS service, avoiding Workers TCP restrictions. LAN/private
+servers are unavailable. Cloudflare restrictions or server TCP filtering can
+still prevent public server queries. Output includes resolver, transport, query,
+response code, authoritative/truncated flags, TTLs, answers, authority/additional
+sections and elapsed time. DS/DNSKEY/TLSA currently show their raw RDATA in hex.
+ANY may return a minimal answer and does not enumerate the zone.
+
+SPF was already requested via TXT (type 16), never legacy SPF type 99. The
+parser now handles quoted chunks, inter-chunk whitespace and DNS text escapes,
+and recognizes the exact SPF version token. SERVFAIL/REFUSED are incomplete
+checks rather than false missing-SPF results. Subdomain labels use the same
+parser. This checks SPF publication, not a sender IP authorization decision.
+
+Validation: node test.mjs and node manual-test.mjs; live Cloudflare DoH
+response parsed successfully. Custom TCP behavior tested with a mocked
+fragmented stream, including compression bounds and selected-server routing.
+The Worker has not been deployed or live TCP-tested from Cloudflare.
+
+
 ## Build 19 — crt.sh timeout handling and inline refresh
 
 Refresh controls now appear beside the Standard Records / Web ports result
@@ -178,6 +205,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 19 beneath it.
+The page will read DNS Tools with Build 20 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs
