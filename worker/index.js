@@ -858,6 +858,8 @@ function pageResponse() {
       padding: 18px 20px;
       border-bottom: 1px solid rgba(255, 255, 255, 0.1);
     }
+    .history-entry { margin-top:8px; text-align:left; overflow-wrap:anywhere; }
+    .history-entry small { display:block; margin-top:5px; font-weight:normal; }
     .result-actions { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
     .result-actions button { width:auto; }
     [hidden] { display:none !important; }
@@ -972,7 +974,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 20</p>
+          <p class="brand-subtitle">Build 21</p>
         </div>
       </div>
     </header>
@@ -980,7 +982,6 @@ function pageResponse() {
     <section class="layout">
       <aside class="panel side">
         <h1>DNS tools</h1>
-        <p><a href="/dns-lookup">Open DNS Lookup →</a></p>
         <p>Check common DNS records, TXT records, MX, DMARC, and basic mail health from one simple page.</p>
 
         <form id="lookup-form">
@@ -994,12 +995,17 @@ function pageResponse() {
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="mail">Mail check</button>
+            <button type="button" class="secondary" id="dns-lookup">DNS Lookup</button>
             <button type="button" class="secondary" id="copy">Copy results</button>
           </div>
 
         </form>
-
-
+        <section style="margin-top:24px" aria-label="Recent scans">
+          <h2 style="font-size:18px">Recent scans</h2>
+          <div id="recent-scans"></div>
+          <p id="history-note" class="input-help"></p>
+          <button type="button" class="secondary" id="clear-history">Clear history</button>
+        </section>
       </aside>
 
       <section class="panel result">
@@ -1065,6 +1071,7 @@ function pageResponse() {
       else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
       else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
       portsButton.title=hint.textContent;
+      renderHistory();
     }
     domainInput.addEventListener("input",()=>{
       clearTimeout(autoScanTimer);
@@ -1403,6 +1410,7 @@ function decodeTxtPresentation(value) {
           data.checked+=batch.length;renderWeb(data);
         }
         webCache.set(data.domain,data);
+        const remembered=recentScans.find(s=>s.domain===data.domain);if(remembered){remembered.web=data;persistHistory();}
         setStatus(hosts.length?"Web check complete. Standard Records were not rescanned.":"No resolved hostnames available in this scan.");
       }finally{webBusy=false;updateWebButton();}
     }
@@ -1596,7 +1604,7 @@ function decodeTxtPresentation(value) {
         if(sequence!==lookupSequence)return;
       }
 
-      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);updateWebButton();}
+      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);rememberScan();updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") {await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;}
@@ -1618,6 +1626,7 @@ function decodeTxtPresentation(value) {
       savedAudit={domain,hosts:discoveredWebHosts.slice(),data};
       standardCache.set(domain,savedAudit);
       if(savedAudit.hosts.join("|")!==previousHosts)webCache.delete(domain);
+      rememberScan(false);
       updateWebButton();
       setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
     }
@@ -1664,6 +1673,59 @@ function decodeTxtPresentation(value) {
         setStatus(error.message || "Lookup failed.");
       }
     });
+
+    const HISTORY_KEY="dns-tools-history-v1";
+    let recentScans=[],historyMessage="Saved in this browser. Select a scan to restore it without rescanning.";
+    function packAudit(data){return {...data,checks:data.checks.map(c=>[c.name,c.type,c.status,c.answers.map(a=>[a.ttl,a.value]),c.source||null,c.error||null])};}
+    function unpackAudit(data){return {...data,checks:data.checks.map(c=>({name:c[0],type:c[1],status:c[2],answers:c[3].map(a=>({ttl:a[0],value:a[1]})),...(c[4]?{source:c[4]}:{}),...(c[5]?{error:c[5]}:{})}))};}
+    function renderHistory(){
+      const list=document.getElementById("recent-scans");
+      list.innerHTML=recentScans.map((s,i)=>'<button type="button" class="secondary history-entry" data-scan="'+i+'" '+(auditRunning||webBusy?'disabled':'')+'>'+escapeText(s.domain)+'<small>'+escapeText(new Date(s.scannedAt).toLocaleString())+'</small></button>').join('')||'<p>No saved scans yet.</p>';
+      document.getElementById("history-note").textContent=historyMessage;
+      document.getElementById("clear-history").disabled=!recentScans.length||auditRunning||webBusy;
+    }
+    function persistHistory(){
+      try{localStorage.setItem(HISTORY_KEY,JSON.stringify({version:1,scans:recentScans.map(s=>({...s,data:packAudit(s.data)}))}));historyMessage="Saved in this browser. Select a scan to restore it without rescanning.";}
+      catch{historyMessage="Browser storage is unavailable or full. These scans are available only until this page closes; previously saved history may remain.";}
+      renderHistory();
+    }
+    function rememberScan(fresh=true){
+      if(!savedAudit?.data)return;
+      const domain=savedAudit.domain,old=recentScans.find(s=>s.domain===domain);
+      const entry={domain,scannedAt:fresh?new Date().toISOString():(old?.scannedAt||new Date().toISOString()),hosts:savedAudit.hosts.slice(),data:JSON.parse(JSON.stringify(savedAudit.data)),web:webCache.get(domain)||null};
+      recentScans=[entry,...recentScans.filter(s=>s.domain!==domain)].slice(0,5);persistHistory();
+    }
+    function loadHistory(){
+      try{
+        const raw=JSON.parse(localStorage.getItem(HISTORY_KEY)||'null');
+        if(raw?.version===1&&Array.isArray(raw.scans)){
+          for(const s of raw.scans.slice(0,5)){
+            try{if(typeof s.domain!=="string"||!Number.isFinite(Date.parse(s.scannedAt))||s.data?.domain!==s.domain||!Array.isArray(s.hosts)||!Array.isArray(s.data.checks)||s.data.checks.length>10000)continue;
+              const data=unpackAudit(s.data);recentScans.push({...s,data});standardCache.set(s.domain,{domain:s.domain,hosts:s.hosts,data});if(s.web?.domain===s.domain&&Array.isArray(s.web.results))webCache.set(s.domain,s.web);
+            }catch{}
+          }
+        }
+      }catch{historyMessage="Saved history could not be loaded. New scans can still run.";}
+      renderHistory();
+    }
+    document.getElementById("recent-scans").addEventListener("click",event=>{
+      const button=event.target.closest("[data-scan]");if(!button||auditRunning||webBusy)return;
+      const entry=recentScans[Number(button.dataset.scan)];if(!entry)return;
+      clearTimeout(autoScanTimer);++lookupSequence;domainInput.value=entry.domain;activeScanDomain=entry.domain;
+      const data=JSON.parse(JSON.stringify(entry.data));savedAudit={domain:entry.domain,hosts:entry.hosts.slice(),data};standardCache.set(entry.domain,savedAudit);
+      if(entry.web)webCache.set(entry.domain,entry.web);else webCache.delete(entry.domain);
+      showWildcards=false;renderAudit(data);updateWebButton();
+      const url=new URL(location.href);url.searchParams.set("domain",entry.domain);history.replaceState(null,"",url);
+      setStatus("Done. Restored scan from "+new Date(entry.scannedAt).toLocaleString()+". Use Refresh to scan again.");
+    });
+    document.getElementById("clear-history").addEventListener("click",()=>{
+      if(auditRunning||webBusy)return;
+      try{localStorage.removeItem(HISTORY_KEY);recentScans=[];standardCache.clear();webCache.clear();historyMessage="History cleared. Current results remain visible.";}
+      catch{historyMessage="Could not clear browser storage. Allow storage for this site and try again.";}
+      renderHistory();updateWebButton();
+    });
+    document.getElementById("dns-lookup").addEventListener("click",()=>{location.href="/dns-lookup";});
+    loadHistory();
 
     if(params.get("domain"))void startStandard(false);
 

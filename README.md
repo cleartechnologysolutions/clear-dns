@@ -1,5 +1,21 @@
 # DNS Tools
 
+## Build 21 — recent scans and DNS Lookup button
+
+Recent scans retains the five most recently completed distinct domains in
+localStorage, with scan timestamps, Standard Records, certificate results and
+completed web-port results. Selecting a saved scan restores it without network
+requests. Refresh explicitly scans again; rescanning a domain replaces its old
+entry. Results stay on this browser/origin, with Clear history provided. Clearing
+history leaves currently displayed results visible. Storage errors are shown;
+when storage is blocked/full the latest history is only available in memory.
+
+DNS Lookup is now a sidebar button. PTR remains available in the manual lookup
+record-type selector; automatic reverse DNS is not added to Standard Records.
+
+Validation: node test.mjs, node manual-test.mjs, node history-test.mjs.
+
+
 ## Build 20 — manual DNS lookup and SPF TXT handling
 
 Open DNS Lookup links to /dns-lookup, an independent form which does not start
@@ -205,6 +221,6 @@ A DNS answer alone is not proof that a website or service exists at that name.
 
 Upload the ZIP contents to your existing DNS repository and commit.
 Leave the Build command empty; keep the Deploy command above.
-The page will read DNS Tools with Build 20 beneath it.
+The page will read DNS Tools with Build 21 beneath it.
 
 Run the mocked DNS and browser-script checks with: node test.mjs
