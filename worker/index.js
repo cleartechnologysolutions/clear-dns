@@ -1000,7 +1000,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 24</p>
+          <p class="brand-subtitle">Build 25</p>
         </div>
       </div>
     </header>
@@ -1018,7 +1018,7 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
-            <button type="button" class="secondary" id="ptr" title="Check domain IPs, or all discovered IPs after Standard Records">Reverse DNS / PTR</button>
+            <button type="button" class="secondary" id="ptr" disabled title="Finish Standard Records for this domain first">Reverse DNS / PTR</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="health">DNS Health</button>
@@ -1040,7 +1040,7 @@ function pageResponse() {
         <div class="scan-status">
           <div class="status" id="status" role="status" aria-live="polite">Enter a domain and choose a tool.</div>
           <progress id="scan-progress" max="100" value="0" aria-label="Current scan phase progress"></progress>
-          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
+          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Web Ports and PTR will unlock automatically.</p>
         </div>
         <div class="result-head">
           <p class="result-title" id="result-title">Results</p>
@@ -1098,19 +1098,19 @@ function pageResponse() {
       retryCrtButton.hidden=!(resultView==="audit"&&ready&&savedAudit.data?.crtNote?.startsWith("crt.sh discovery incomplete"));
       retryCrtButton.disabled=auditRunning;
       document.getElementById("refresh-health").disabled=false;
-      ptrButton.disabled=refreshPtrButton.disabled=false;
+      ptrButton.disabled=refreshPtrButton.disabled=auditRunning||!ready;
       portsButton.disabled=auditRunning||!ready;
       for(const button of [healthButton,domainInfoButton,mailButton,auditButton])button.disabled=false;
       rescanStandardButton.disabled=auditRunning;
       rescanWebButton.disabled=auditRunning||!ready;
       portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
-      if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
+      if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Web Ports and PTR will unlock automatically.";}
       else if(webBusy&&resultView==="ptr"){hint.textContent="Checking reverse DNS for IP addresses from the saved Standard Records scan.";}
       else if(webBusy&&resultView==="health"){hint.textContent="Comparing published authoritative nameservers.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
       else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
-      else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Check web ports will unlock automatically.";}
+      else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Web Ports and PTR will unlock automatically.";}
       portsButton.title=hint.textContent;
       renderHistory();
     }
@@ -1450,18 +1450,17 @@ function reverseDnsName(value){
         if(row.error)lines.push('  '+row.error);lines.push('');
       }
       if(!data.total)lines.push('No A or AAAA addresses were found in the saved scan.');
-      lines.push(data.fromScan===false?'Uses main-domain A/AAAA answers. Run Standard Records to include discovered subdomains.':'Uses the saved A/AAAA answers, including wildcard matches; each unique IP is checked once.','PTR records are managed by the IP owner and may not match the scanned domain.');
+      lines.push('Uses the saved A/AAAA answers, including wildcard matches; each unique IP is checked once.','PTR records are managed by the IP owner and may not match the scanned domain.');
       lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
     }
     async function runPtrCheck(force=false){
       clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();if(!domain){setStatus('Enter a domain first.');return;}
+      if(auditRunning||savedAudit?.domain!==domain||!savedAudit.data){setStatus('Finish Standard Records for this domain before checking PTR.');return;}
       const sequence=++taskSequence;setResultView('ptr');
-      const fromScan=savedAudit?.domain===domain&&!!savedAudit.data;
-      if(!force&&ptrCache.has(domain)&&(!fromScan||ptrCache.get(domain).fromScan)){renderPtr(ptrCache.get(domain));setStatus('Done. Showing saved PTR results.');return;}
-      let checks=fromScan?savedAudit.data.checks:[];
-      if(!fromScan){setStatus('Resolving main-domain IPs for PTR...');try{checks=await Promise.all(['A','AAAA'].map(async type=>{const u=new URL('/api/lookup',location.origin);u.searchParams.set('name',domain);u.searchParams.set('type',type);const r=await fetch(u);const d=await r.json();if(!r.ok)throw Error(d.error||'DNS lookup failed');return {...d,name:domain,type};}));}catch(e){if(sequence===taskSequence)setStatus(e.message);return;}}
-      if(sequence!==taskSequence)return;
+      const fromScan=true;
+      if(!force&&ptrCache.has(domain)&&ptrCache.get(domain).fromScan!==false){renderPtr(ptrCache.get(domain));setStatus('Done. Showing saved PTR results.');return;}
+      const checks=savedAudit.data.checks;
       const targets=ptrTargets(checks),data={domain,fromScan,total:targets.length,checked:0,results:[]};
       webBusy=true;renderPtr(data);updateWebButton();
       try{

@@ -273,4 +273,7 @@ The page will read DNS Tools with Build 23 beneath it.
 Run the mocked DNS and browser-script checks with: node test.mjs
 
 ## Build 24: independent tools
-Entering or changing a domain, pressing Enter in the domain field, and opening a URL with a domain no longer start Standard Records. Click Standard Records to start; click it again to return to existing results. Refresh explicitly rescans. Only Web Ports requires a completed Standard Records scan. Domain Info, Mail Check and DNS Health can run before or during discovery without interrupting it. Switching tools does not let background discovery overwrite the tool you are viewing. PTR uses root A/AAAA addresses before discovery and all saved scan addresses after it. Mail Check shows primary-domain records immediately and can include discovered subdomains after a completed scan.
+Entering or changing a domain, pressing Enter in the domain field, and opening a URL with a domain no longer start Standard Records. Click Standard Records to start; click it again to return to existing results. Refresh explicitly rescans. Web Ports and PTR require a completed Standard Records scan. Domain Info, Mail Check and DNS Health can run before or during discovery without interrupting it. Switching tools does not let background discovery overwrite the tool you are viewing. PTR checks the IP addresses from the completed Standard Records scan. Mail Check shows primary-domain records immediately and can include discovered subdomains after a completed scan.
+
+## Build 25
+Restored the completed Standard Records prerequisite for PTR (including its Refresh button). Domain Info, Mail Check and DNS Health still work independently during a Standard Records scan.
