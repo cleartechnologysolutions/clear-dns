@@ -56,7 +56,7 @@ const worker = server.worker;
 const html = await worker.fetch(new Request("https://dns.example")).text();
 assert.match(html, />Standard Records<\/button>/);
 assert.match(html, /<title>DNS Tools<\/title>/);
-assert.match(html, /Build 23/);
+assert.match(html, /Build 24/);
 assert.doesNotMatch(html, /Clear Technology Solutions|Clear DNS|CLEAR DNS|>CTS</);
 assert.doesNotMatch(html, /Standard scan|STANDARD SCAN/);
 
@@ -340,7 +340,7 @@ client.fetch=async(url,options)=>{
  assert.equal(new URL(url).searchParams.get('mode'),'mail-subdomains');called.push(...JSON.parse(options.body).hosts);return Response.json(mailBatch);
 };
 vm.runInContext('savedAudit={domain:"example.com",hosts:["example.com","jira.example.com","empty.example.com","broken.example.com"]}',client);
-await vm.runInContext('extendMailCheck(mailData,lookupSequence)',client);
+await vm.runInContext('extendMailCheck(mailData,taskSequence)',client);
 assert.deepEqual(called,['jira.example.com','empty.example.com','broken.example.com']);
 const mailReport=client.report();
 assert.ok(mailReport.indexOf('PRIMARY DOMAIN')<mailReport.indexOf('SUBDOMAIN MAIL RECORDS'));
@@ -348,7 +348,7 @@ assert.match(mailReport,/Complete: 3 of 3/);assert.match(mailReport,/SPF TXT/);a
 assert.doesNotMatch(mailReport,/empty.example.com/);assert.match(mailReport,/Inheritance is not evaluated/);
 const callsBefore=called.length;
 vm.runInContext('savedAudit={domain:"other.example",hosts:["mail.other.example"]}',client);
-await vm.runInContext('extendMailCheck({...mailData,subdomains:undefined},lookupSequence)',client);
+await vm.runInContext('extendMailCheck({...mailData,subdomains:undefined},taskSequence)',client);
 assert.equal(called.length,callsBefore);
 console.log('PASS: discovered-only subdomain mail scope, bounded/deduplicated batches, primary-first report, SPF/TXT/MX, direct DMARC, hidden empty results, visible failures, and scan/domain gate.');
 

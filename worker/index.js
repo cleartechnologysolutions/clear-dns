@@ -1000,7 +1000,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 23</p>
+          <p class="brand-subtitle">Build 24</p>
         </div>
       </div>
     </header>
@@ -1014,11 +1014,11 @@ function pageResponse() {
           <label for="domain">Domain</label>
           <input id="domain" name="domain" autocomplete="off" spellcheck="false" placeholder="example.com">
 
-          <p class="input-help">Standard Records starts automatically after you enter a domain. Press Enter to start immediately.</p>
+          <p class="input-help">Enter a domain, then choose a tool. Click Standard Records to start discovery.</p>
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
-            <button type="button" class="secondary" id="ptr" disabled title="Finish Standard Records first">Reverse DNS / PTR</button>
+            <button type="button" class="secondary" id="ptr" title="Check domain IPs, or all discovered IPs after Standard Records">Reverse DNS / PTR</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
             <button type="button" class="secondary" id="health">DNS Health</button>
@@ -1038,7 +1038,7 @@ function pageResponse() {
 
       <section class="panel result">
         <div class="scan-status">
-          <div class="status" id="status" role="status" aria-live="polite">Enter a domain to start Standard Records.</div>
+          <div class="status" id="status" role="status" aria-live="polite">Enter a domain and choose a tool.</div>
           <progress id="scan-progress" max="100" value="0" aria-label="Current scan phase progress"></progress>
           <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Check web ports will unlock automatically.</p>
         </div>
@@ -1053,7 +1053,7 @@ function pageResponse() {
           </div>
         </div>
         <div class="record-list" id="results">
-          <div class="empty">Enter a domain. Standard Records will start automatically.</div>
+          <div class="empty">Enter a domain, then click Standard Records or another tool.</div>
         </div>
       </section>
     </section>
@@ -1077,7 +1077,9 @@ function pageResponse() {
     const resultTitle = document.getElementById("result-title");
     const results = document.getElementById("results");
     let lastText = "";
-    let lookupSequence = 0;
+    let lookupSequence = 0, taskSequence = 0;
+    let scanStatus="", latestScan=null;
+    function setScanStatus(message){scanStatus=message;if(resultView==="audit")setStatus(message);}
     let autoScanTimer, activeScanDomain="";
     let showWildcards = false;
     let currentAudit = null, resultView="";
@@ -1094,12 +1096,13 @@ function pageResponse() {
     function updateWebButton(){
       const ready=!!savedAudit&&cleanDomain(domainInput.value).toLowerCase()===savedAudit.domain;
       retryCrtButton.hidden=!(resultView==="audit"&&ready&&savedAudit.data?.crtNote?.startsWith("crt.sh discovery incomplete"));
-      retryCrtButton.disabled=webBusy||auditRunning;
-      document.getElementById("refresh-health").disabled=webBusy||auditRunning;
-      ptrButton.disabled=refreshPtrButton.disabled=webBusy||auditRunning||!ready;
-      portsButton.disabled=webBusy||auditRunning||!ready;
-      for(const button of [healthButton,domainInfoButton,mailButton,auditButton,rescanStandardButton])button.disabled=auditRunning||webBusy;
-      rescanWebButton.disabled=webBusy||auditRunning||!ready;
+      retryCrtButton.disabled=auditRunning;
+      document.getElementById("refresh-health").disabled=false;
+      ptrButton.disabled=refreshPtrButton.disabled=false;
+      portsButton.disabled=auditRunning||!ready;
+      for(const button of [healthButton,domainInfoButton,mailButton,auditButton])button.disabled=false;
+      rescanStandardButton.disabled=auditRunning;
+      rescanWebButton.disabled=auditRunning||!ready;
       portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
       if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Check web ports will unlock automatically.";}
@@ -1112,13 +1115,10 @@ function pageResponse() {
       renderHistory();
     }
     domainInput.addEventListener("input",()=>{
-      clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();
-      if(domain!==activeScanDomain&&auditRunning){++lookupSequence;auditRunning=false;activeScanDomain="";setStatus("Domain changed. Waiting for a valid domain...");}
+      if(domain!==activeScanDomain){++lookupSequence;++taskSequence;auditRunning=false;webBusy=false;latestScan=null;activeScanDomain=domain;setStatus("Choose a tool for this domain.");}
       updateWebButton();
-      autoScanTimer=setTimeout(()=>startStandard(false),1200);
     });
-    domainInput.addEventListener("change",()=>startStandard(false));
 
     results.addEventListener("change", event => {
       if (event.target.id !== "show-wildcards" || !currentAudit) return;
@@ -1245,7 +1245,7 @@ function decodeTxtPresentation(value) {
       data.subdomains={total:hosts.length,checked:0,checks:[],complete:false};
       renderMail(data);
       for(let i=0;i<hosts.length;i+=12){
-        if(sequence!==lookupSequence)return;
+        if(sequence!==taskSequence)return;
         const batch=hosts.slice(i,i+12);
         setStatus("Primary domain complete. Checking subdomain mail records: "+i+" of "+hosts.length+"...");
         const api=new URL("/api/lookup",location.origin);api.searchParams.set("mode","mail-subdomains");api.searchParams.set("name",data.domain);
@@ -1256,7 +1256,7 @@ function decodeTxtPresentation(value) {
         }catch{
           data.subdomains.checks.push(...batch.flatMap(host=>[{host,name:host,type:"MX",status:"ERROR",answers:[]},{host,name:host,type:"TXT",status:"ERROR",answers:[]},{host,name:"_dmarc."+host,type:"TXT",status:"ERROR",answers:[]}]));
         }
-        if(sequence!==lookupSequence)return;
+        if(sequence!==taskSequence)return;
         data.subdomains.checked+=batch.length;renderMail(data);
       }
       data.subdomains.complete=true;renderMail(data);
@@ -1270,10 +1270,10 @@ function decodeTxtPresentation(value) {
       }).join("\\n");
     }
 
-    function renderAudit(data) {
-      setResultView("audit");
+    function renderAudit(data, background=false) {
+      if(!background)setResultView("audit");
+      latestScan=data;
       currentAudit = data;
-      resultTitle.textContent = auditRunning ? "Standard Records — scan in progress (partial results)" : "Standard Records";
       const resolved = data.checks.filter(check => check.answers.length);
       const names = new Map();
       for (const check of data.checks) {
@@ -1299,6 +1299,8 @@ function decodeTxtPresentation(value) {
       }
       const found = resolved.filter(check => !uncertain.has(check.name));
       discoveredWebHosts=[...new Set(found.filter(c=>["A","AAAA","CNAME"].includes(c.type)&&!c.name.includes("*")&&!c.name.includes("_")).map(c=>c.name))].sort();
+      if(resultView!=="audit")return;
+      resultTitle.textContent=auditRunning?"Standard Records — scan in progress (partial results)":"Standard Records";
       const likely = resolved.filter(check => uncertain.has(check.name));
       const byType = {};
       for (const check of found) {
@@ -1398,7 +1400,7 @@ function decodeTxtPresentation(value) {
         if (sequence !== lookupSequence) return;
         const batch = eligible.slice(offset, offset + 4);
         data.wildcardAttempted.push(...batch);
-        setStatus("Checking wildcard DNS: " + data.wildcardAttempted.length + " scopes...");
+        setScanStatus("Checking wildcard DNS: " + data.wildcardAttempted.length + " scopes...");
         const api = new URL("/api/lookup", location.origin);
         api.searchParams.set("name", data.domain);
         api.searchParams.set("mode", "wildcard");
@@ -1426,9 +1428,9 @@ function reverseDnsName(value){
   if(groups.length!==8)throw Error('Invalid IPv6 address.');
   return groups.map(g=>g.padStart(4,'0')).join('').split('').reverse().join('.')+'.ip6.arpa';
 }
-    function ptrTargets(){
+    function ptrTargets(checks=savedAudit?.data?.checks||[]){
       const targets=new Map();
-      for(const check of savedAudit?.data?.checks||[]){
+      for(const check of checks){
         if(!['A','AAAA'].includes(check.type))continue;
         for(const answer of check.answers||[]){try{
           const reverse=reverseDnsName(answer.value);
@@ -1448,15 +1450,19 @@ function reverseDnsName(value){
         if(row.error)lines.push('  '+row.error);lines.push('');
       }
       if(!data.total)lines.push('No A or AAAA addresses were found in the saved scan.');
-      lines.push('Uses the saved A/AAAA answers, including wildcard matches; each unique IP is checked once.','PTR records are managed by the IP owner and may not match the scanned domain.');
+      lines.push(data.fromScan===false?'Uses main-domain A/AAAA answers. Run Standard Records to include discovered subdomains.':'Uses the saved A/AAAA answers, including wildcard matches; each unique IP is checked once.','PTR records are managed by the IP owner and may not match the scanned domain.');
       lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
     }
     async function runPtrCheck(force=false){
-      clearTimeout(autoScanTimer);if(auditRunning||webBusy)return;
-      if(!savedAudit?.data||savedAudit.domain!==cleanDomain(domainInput.value).toLowerCase()){setStatus('Finish Standard Records for this domain first.');return;}
-      const domain=savedAudit.domain;
-      if(!force&&ptrCache.has(domain)){renderPtr(ptrCache.get(domain));setStatus('Done. Showing saved PTR results. Use Refresh to check again.');return;}
-      const targets=ptrTargets(),data={domain,total:targets.length,checked:0,results:[]},sequence=++lookupSequence;
+      clearTimeout(autoScanTimer);
+      const domain=cleanDomain(domainInput.value).toLowerCase();if(!domain){setStatus('Enter a domain first.');return;}
+      const sequence=++taskSequence;setResultView('ptr');
+      const fromScan=savedAudit?.domain===domain&&!!savedAudit.data;
+      if(!force&&ptrCache.has(domain)&&(!fromScan||ptrCache.get(domain).fromScan)){renderPtr(ptrCache.get(domain));setStatus('Done. Showing saved PTR results.');return;}
+      let checks=fromScan?savedAudit.data.checks:[];
+      if(!fromScan){setStatus('Resolving main-domain IPs for PTR...');try{checks=await Promise.all(['A','AAAA'].map(async type=>{const u=new URL('/api/lookup',location.origin);u.searchParams.set('name',domain);u.searchParams.set('type',type);const r=await fetch(u);const d=await r.json();if(!r.ok)throw Error(d.error||'DNS lookup failed');return {...d,name:domain,type};}));}catch(e){if(sequence===taskSequence)setStatus(e.message);return;}}
+      if(sequence!==taskSequence)return;
+      const targets=ptrTargets(checks),data={domain,fromScan,total:targets.length,checked:0,results:[]};
       webBusy=true;renderPtr(data);updateWebButton();
       try{
         for(let i=0;i<targets.length;i+=20){
@@ -1467,13 +1473,13 @@ function reverseDnsName(value){
             const response=await fetch(url,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({ips:batch.map(t=>t.ip)})});
             const result=await response.json();if(!response.ok)throw Error(result.error||'PTR query failed.');rows=result.checks;
           }catch(error){rows=batch.map(t=>({name:t.reverse,status:'ERROR',answers:[],error:error.message}));}
-          if(sequence!==lookupSequence)return;
+          if(sequence!==taskSequence)return;
           data.results.push(...batch.map(t=>({...t,...(rows.find(r=>r.name===t.reverse)||{status:'ERROR',answers:[],error:'Missing lookup result.'})})));
           data.checked+=batch.length;renderPtr(data);
         }
         ptrCache.set(domain,data);const entry=recentScans.find(s=>s.domain===domain);if(entry){entry.ptr=data;persistHistory();}
         setStatus('Done. PTR checks complete. Standard Records were not rescanned.');
-      }finally{webBusy=false;updateWebButton();}
+      }finally{if(sequence===taskSequence){webBusy=false;updateWebButton();}}
     }
     ptrButton.addEventListener('click',()=>runPtrCheck());
     refreshPtrButton.addEventListener('click',()=>runPtrCheck(true));
@@ -1495,15 +1501,16 @@ function reverseDnsName(value){
     }
     async function runWebCheck(force=false){
       clearTimeout(autoScanTimer);
-      if(webBusy||auditRunning)return;
+      if(auditRunning)return;
       if(!savedAudit||cleanDomain(domainInput.value).toLowerCase()!==savedAudit.domain){setStatus("Run Standard Records for this domain first.");return;}
+      const sequence=++taskSequence;webBusy=false;
       if(!force&&webCache.has(savedAudit.domain)){renderWeb(webCache.get(savedAudit.domain));setStatus("Done. Showing saved web-port results. Use Refresh beside the results heading to check again.");return;}
-      const hosts=savedAudit.hosts.slice(),sequence=++lookupSequence;
+      const hosts=savedAudit.hosts.slice();
       const data={domain:savedAudit.domain,total:hosts.length,checked:0,results:[]};
       webBusy=true;updateWebButton();renderWeb(data);
       try {
         for(let i=0;i<hosts.length;i+=4){
-          if(sequence!==lookupSequence)return;
+          if(sequence!==taskSequence)return;
           const batch=hosts.slice(i,i+4);
           setStatus("Checking web ports: "+i+" of "+hosts.length+" discovered hosts...");
           const api=new URL("/api/lookup",location.origin);api.searchParams.set("mode","web");api.searchParams.set("name",data.domain);
@@ -1512,13 +1519,13 @@ function reverseDnsName(value){
             const result=await response.json();if(!response.ok)throw Error(result.error||"Web check failed");
             data.results.push(...result.results);
           }catch {data.results.push(...batch.flatMap(hostname=>[80,443].map(port=>({hostname,port,status:"UNCONFIRMED",detail:"Batch failed; retry web check"}))));}
-          if(sequence!==lookupSequence)return;
+          if(sequence!==taskSequence)return;
           data.checked+=batch.length;renderWeb(data);
         }
         webCache.set(data.domain,data);
         const remembered=recentScans.find(s=>s.domain===data.domain);if(remembered){remembered.web=data;persistHistory();}
         setStatus(hosts.length?"Web check complete. Standard Records were not rescanned.":"No resolved hostnames available in this scan.");
-      }finally{webBusy=false;updateWebButton();}
+      }finally{if(sequence===taskSequence){webBusy=false;updateWebButton();}}
     }
 
     function renderDomainInfo(data) {
@@ -1588,8 +1595,8 @@ function reverseDnsName(value){
     async function discoverForAudit(data, sequence) {
       const domain=data.domain;
         // Show standard results immediately while the certificate search runs.
-        renderAudit(data);
-        setStatus("Searching crt.sh for additional hostnames...");
+        renderAudit(data,true);
+        setScanStatus("Searching crt.sh for additional hostnames...");
         try {
           const discoveryApi = new URL("/api/lookup", location.origin);
           discoveryApi.searchParams.set("name", domain);
@@ -1597,7 +1604,7 @@ function reverseDnsName(value){
           let discovery;
           for(let attempt=1;attempt<=2;attempt++){
             if(sequence!==lookupSequence)return;
-            setStatus("Searching crt.sh — attempt "+attempt+" of 2 (up to 45 seconds per attempt)...");
+            setScanStatus("Searching crt.sh — attempt "+attempt+" of 2 (up to 45 seconds per attempt)...");
             let retryable=false;
             try{
               const response=await fetch(discoveryApi);
@@ -1612,7 +1619,7 @@ function reverseDnsName(value){
             }catch(error){
               if(sequence!==lookupSequence)return;
               if(attempt===2||!(retryable||error instanceof TypeError))throw error;
-              setStatus("Searching crt.sh: temporary failure — retrying in 2 seconds. DNS results are preserved.");
+              setScanStatus("Searching crt.sh: temporary failure — retrying in 2 seconds. DNS results are preserved.");
               await new Promise(resolve=>setTimeout(resolve,2000));
             }
           }
@@ -1629,10 +1636,10 @@ function reverseDnsName(value){
             .filter(task => !existing.has(task.name + "|" + task.type));
           data.crtNote = "crt.sh: " + discovery.names.length + " certificate hostnames and " + data.certificatePatterns.length + " wildcard patterns discovered." +
             (discovery.limited ? " Limited to the first 1,000 unique certificate names/patterns." : "");
-          renderAudit(data);
+          renderAudit(data,true);
           discoveryApi.searchParams.set("mode", "crt-records");
           for (let offset = 0; offset < tasks.length; offset += 40) {
-            setStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");
+            setScanStatus("Verifying crt.sh names in DNS: " + offset + " of " + tasks.length + " checks...");
             const checksResponse = await fetch(discoveryApi, {
               method: "POST",
               headers: { "content-type": "application/json" },
@@ -1644,7 +1651,7 @@ function reverseDnsName(value){
             data.checks = data.checks.concat(batch.checks);
             data.checked += batch.checks.length;
             data.found += batch.checks.filter(check => check.answers.length).length;
-            renderAudit(data);
+            renderAudit(data,true);
           }
         } catch (error) {
           if (sequence !== lookupSequence) return;
@@ -1653,10 +1660,22 @@ function reverseDnsName(value){
         }
     }
 
+    async function runIndependent(mode){
+      const domain=cleanDomain(domainInput.value).toLowerCase();if(!domain){setStatus("Enter a domain first.");return;}
+      const sequence=++taskSequence;webBusy=false;setResultView(mode);setStatus("Looking up "+domain+"...");results.innerHTML='<div class="empty">Loading...</div>';
+      const api=new URL('/api/lookup',location.origin);api.searchParams.set('name',domain);api.searchParams.set('mode',mode);
+      try{const response=await fetch(api),data=await response.json();if(sequence!==taskSequence)return;if(!response.ok)throw Error(data.error||'Lookup failed.');
+        if(mode==='domain')renderDomainInfo(data);
+        if(mode==='mail'){renderMail(data);setStatus('Checking SPF includes and policy syntax...');try{api.searchParams.set('mode','spf-analysis');const r=await fetch(api);data.analysis=await r.json();}catch(e){data.analysis={error:e.message};}if(sequence!==taskSequence)return;renderMail(data);await extendMailCheck(data,sequence);}
+        if(sequence===taskSequence)setStatus('Done.');
+      }catch(e){if(sequence===taskSequence)setStatus(e.message||'Lookup failed.');}
+    }
     async function runLookup(mode = "audit") {
+      if(mode!=="audit")return runIndependent(mode);
+      setResultView("audit");
       const domain = cleanDomain(domainInput.value);
       if (!domain) {
-        setStatus("Enter a domain first.");
+        setScanStatus("Enter a domain first.");
         return;
       }
       clearTimeout(autoScanTimer);
@@ -1671,7 +1690,7 @@ function reverseDnsName(value){
       url.searchParams.set("domain", domain);
       history.replaceState(null, "", url);
 
-      setStatus("Looking up " + domain + "...");
+      setScanStatus("Looking up " + domain + "...");
       results.innerHTML = '<div class="empty">Checking DNS...</div>';
 
       const api = new URL("/api/lookup", location.origin);
@@ -1689,9 +1708,9 @@ function reverseDnsName(value){
       if (mode === "audit") {
         await probeWildcards(data, data.wildcardScopes, sequence);
         if (sequence !== lookupSequence) return;
-        renderAudit(data);
+        renderAudit(data,true);
         while (data.nextOffset !== null && data.nextOffset !== undefined) {
-          setStatus("Checking Standard Records: " + data.checked + " of " + data.total + "...");
+          setScanStatus("Checking Standard Records: " + data.checked + " of " + data.total + "...");
           api.searchParams.set("offset", data.nextOffset);
           const nextResponse = await fetch(api);
           const batch = await nextResponse.json();
@@ -1704,42 +1723,42 @@ function reverseDnsName(value){
             found: data.found + batch.found,
             checks: data.checks.concat(batch.checks),
           };
-          renderAudit(data);
+          renderAudit(data,true);
         }
         await discoverForAudit(data,sequence);
         if(sequence!==lookupSequence)return;
       }
 
-      if (mode === "audit") {auditRunning=false;renderAudit(data);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);rememberScan();updateWebButton();}
+      if (mode === "audit") {auditRunning=false;renderAudit(data,true);savedAudit={domain:data.domain,hosts:discoveredWebHosts.slice(),data};standardCache.set(data.domain,savedAudit);rememberScan();updateWebButton();}
       else if (mode === "domain") renderDomainInfo(data);
       else if (mode === "all") renderAll(data);
       else if (mode === "mail") {
-        renderMail(data);setStatus("Checking SPF includes and policy syntax...");
+        renderMail(data);setScanStatus("Checking SPF includes and policy syntax...");
         try{const u=new URL(api);u.searchParams.set("mode","spf-analysis");const r=await fetch(u);data.analysis=await r.json();}catch(e){data.analysis={error:e.message};}
         if(sequence!==lookupSequence)return;renderMail(data);await extendMailCheck(data,sequence);if(sequence!==lookupSequence)return;
       }
 
 
-      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. "+data.crtNote+" Use Retry crt.sh only." : "Done.");
+      setScanStatus(data.crtNote?.startsWith("crt.sh discovery incomplete") ? "Done. "+data.crtNote+" Use Retry crt.sh only." : "Done.");
     }
 
     async function retryCertificateDiscovery(){
       clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();
-      if(auditRunning||webBusy||savedAudit?.domain!==domain||!savedAudit.data)return;
+      if(auditRunning||savedAudit?.domain!==domain||!savedAudit.data)return;
       const data=savedAudit.data, previousHosts=savedAudit.hosts.join("|");
       const sequence=++lookupSequence;
-      auditRunning=true;activeScanDomain=domain;updateWebButton();
+      ++taskSequence;webBusy=false;setResultView("audit");auditRunning=true;activeScanDomain=domain;updateWebButton();
       await discoverForAudit(data,sequence);
       if(sequence!==lookupSequence)return;
-      auditRunning=false;renderAudit(data);
+      auditRunning=false;renderAudit(data,true);
       savedAudit={domain,hosts:discoveredWebHosts.slice(),data};
       standardCache.set(domain,savedAudit);
       if(savedAudit.hosts.join("|")!==previousHosts)webCache.delete(domain);
       ptrCache.delete(domain);
       rememberScan(false);
       updateWebButton();
-      setStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
+      setScanStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
     }
     retryCrtButton.addEventListener("click",()=>retryCertificateDiscovery());
 
@@ -1747,16 +1766,16 @@ function reverseDnsName(value){
       clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();
       if(!/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}$/.test(domain)){if(force)setStatus("Enter a valid domain, such as example.com.");return;}
-      if(auditRunning&&activeScanDomain===domain)return;
-      if(webBusy)return;
+      ++taskSequence;webBusy=false;setResultView("audit");
+      if(auditRunning&&activeScanDomain===domain){if(latestScan)renderAudit(latestScan);setStatus(scanStatus||"Standard Records is running...");return;}
       const cached=standardCache.get(domain)||(savedAudit?.domain===domain?savedAudit:null);
       if(!force&&cached?.data){savedAudit=cached;renderAudit(cached.data);updateWebButton();setStatus(cached.data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+cached.data.crtNote+" Use Retry crt.sh only.":"Done. Showing saved Standard Records. Use Refresh beside the results heading to scan again.");return;}
       domainInput.value=domain;
       const expectedSequence=lookupSequence+1;
       try{await runLookup("audit");}
-      catch(error){if(expectedSequence!==lookupSequence)return;auditRunning=false;updateWebButton();setStatus(error.message||"Scan failed. Click Standard Records to retry.");}
+      catch(error){if(expectedSequence!==lookupSequence)return;auditRunning=false;updateWebButton();setScanStatus(error.message||"Scan failed. Click Standard Records to retry.");}
     }
-    form.addEventListener("submit",event=>{event.preventDefault();void startStandard(false);});
+    form.addEventListener("submit",event=>{event.preventDefault();setStatus("Click Standard Records to start scanning, or choose another tool.");});
     auditButton.addEventListener("click",()=>startStandard(false));
     rescanStandardButton.addEventListener("click",()=>startStandard(true));
     rescanWebButton.addEventListener("click",async()=>{try{await runWebCheck(true);}catch(error){setStatus(error.message||"Web check failed.");}});
@@ -1809,25 +1828,26 @@ function reverseDnsName(value){
       lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
     }
     async function runHealth(force=false){
-      clearTimeout(autoScanTimer);if(auditRunning||webBusy)return;
+      clearTimeout(autoScanTimer);
       const domain=cleanDomain(domainInput.value).toLowerCase();if(!domain){setStatus('Enter a domain first.');return;}
+      const sequence=++taskSequence;webBusy=false;
       if(!force&&healthCache.has(domain)){renderHealth(healthCache.get(domain));setStatus('Done. Showing saved DNS Health results.');return;}
-      const sequence=++lookupSequence;webBusy=true;updateWebButton();
+      setResultView("health");webBusy=true;updateWebButton();
       try{
         setStatus('Checking published nameservers...');
         const u=new URL('/api/lookup',location.origin);u.searchParams.set('name',domain);u.searchParams.set('mode','health');
-        const response=await fetch(u),data=await response.json();if(!response.ok)throw Error(data.error||'NS lookup failed.');if(sequence!==lookupSequence)return;
+        const response=await fetch(u),data=await response.json();if(!response.ok)throw Error(data.error||'NS lookup failed.');if(sequence!==taskSequence)return;
         data.reports=[];renderHealth(data);
         for(const server of data.servers){
           setStatus('Checking nameservers: '+data.reports.length+' of '+data.servers.length+' — '+server);
           u.searchParams.set('mode','health-server');u.searchParams.set('server',server);
           try{const r=await fetch(u),report=await r.json();if(!r.ok)throw Error(report.error||'Nameserver check failed');data.reports.push(report);}
           catch(e){data.reports.push({server,results:[{type:'SOA',error:e.message}]});}
-          if(sequence!==lookupSequence)return;renderHealth(data);
+          if(sequence!==taskSequence)return;renderHealth(data);
         }
         healthCache.set(domain,data);setStatus('Done. DNS Health checks complete; review differences and incomplete checks below.');
-      }catch(e){if(sequence===lookupSequence)setStatus(e.message||'DNS Health failed.');}
-      finally{webBusy=false;updateWebButton();}
+      }catch(e){if(sequence===taskSequence)setStatus(e.message||'DNS Health failed.');}
+      finally{if(sequence===taskSequence){webBusy=false;updateWebButton();}}
     }
     healthButton.addEventListener('click',()=>runHealth());
     document.getElementById('refresh-health').addEventListener('click',()=>runHealth(true));
@@ -1873,7 +1893,7 @@ function reverseDnsName(value){
       const data=JSON.parse(JSON.stringify(entry.data));savedAudit={domain:entry.domain,hosts:entry.hosts.slice(),data};standardCache.set(entry.domain,savedAudit);
       if(entry.ptr)ptrCache.set(entry.domain,entry.ptr);else ptrCache.delete(entry.domain);
       if(entry.web)webCache.set(entry.domain,entry.web);else webCache.delete(entry.domain);
-      showWildcards=false;renderAudit(data);updateWebButton();
+      showWildcards=false;setResultView("audit");renderAudit(data);updateWebButton();
       const url=new URL(location.href);url.searchParams.set("domain",entry.domain);history.replaceState(null,"",url);
       setStatus("Done. Restored scan from "+new Date(entry.scannedAt).toLocaleString()+". Use Refresh to scan again.");
     });
@@ -1886,7 +1906,7 @@ function reverseDnsName(value){
     document.getElementById("dns-lookup").addEventListener("click",()=>{location.href="/dns-lookup";});
     loadHistory();
 
-    if(params.get("domain"))void startStandard(false);
+    updateWebButton();
 
     copyButton.addEventListener("click", async () => {
       if (!lastText) {

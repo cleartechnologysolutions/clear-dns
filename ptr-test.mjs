@@ -17,4 +17,4 @@ vm.runInContext(`savedAudit={domain:'example.com',hosts:[],data:{checks:['www','
 await vm.runInContext('runPtrCheck()',client);assert.equal(calls.length,1);assert.deepEqual(calls[0],['8.8.8.8']);assert.match(elements.get('results').innerHTML,/dns.google/);assert.match(elements.get('results').innerHTML,/www.example.com, mail.example.com/);
 await vm.runInContext('runPtrCheck()',client);assert.equal(calls.length,1);
 await vm.runInContext('runPtrCheck(true)',client);assert.equal(calls.length,2);
-console.log('PASS: IPv4/IPv6 reverse names, invalid input, batch bounds, PTR-only queries, deduplication, scan prerequisite, hostname mapping, cached navigation and explicit refresh.');
+console.log('PASS: IPv4/IPv6 reverse names, invalid input, batch bounds, PTR-only queries, deduplication, hostname mapping, cached navigation and explicit refresh.');
