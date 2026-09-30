@@ -1,5 +1,22 @@
 # DNS Tools
 
+## Build 26 — NS Compare
+
+Run Standard Records to completion, then click NS Compare. It reuses every resolved name/type pair from that scan (including hidden wildcard matches and crt.sh finds); it does not repeat hostname enumeration. Queries A, AAAA, CNAME, MX, TXT, NS, SOA and CAA.
+
+The tool discovers the currently published apex NS set and sends nonrecursive TCP/53 queries directly to each named server, comparing them with current Cloudflare and Google recursive DNS answers. Results are grouped by record with differences first, and show the saved scan value alongside current results. It checks up to 16 nameservers, explicitly reporting if more exist. One reachable address per NS name is used by the existing manual DNS transport. This is a cloud observation, not a test of every anycast location or the visitor’s local resolver.
+
+NS DISAGREE means usable authoritative answers differ; PUBLIC DIFFERS means public DNS differs from at least one usable authoritative answer. TTL countdowns and answer order are ignored. TXT case is preserved, split TXT strings and IPv6 representations are normalized. For aliases, compare only requested-owner records and CNAME, excluding recursively followed target records. TTLs remain visible. NXDOMAIN and empty NOERROR are distinct.
+
+Timeouts, connection restrictions, truncation and non-authoritative answers are INCOMPLETE, never MATCH. Child-zone delegations are shown as referrals, not followed: this comparison specifically tests the entered domain’s NS set. Cloudflare Workers can block TCP connections to Cloudflare IPs; blocked authoritative servers cannot be verified from this deployment. Geo-DNS and cache propagation can create legitimate differences; a difference is not automatically a misconfiguration.
+
+Four queries per batch, bounded server timeouts, progress above results, Stop and Refresh. Results are cached in the current page; scan history still restores the source scan, but NS comparisons are not persisted across reloads. A new Standard Records scan invalidates its comparison.
+
+Deploy by replacing repository files and running the same existing Wrangler deploy command. No new bindings, keys or database changes. Header: Build 26.
+
+Tests: ns-compare-test.mjs and ns-compare-ui-test.mjs cover record normalization, incomplete results, direct nonrecursive calls, input restrictions, scan prerequisites, cached navigation and explicit refresh. Existing lookup/navigation/history/PTR/health tests also pass. Real authoritative reachability depends on the deployed Worker and target DNS servers.
+
+
 ## Build 23 — SPF analysis and DNS Health
 
 Mail Check now appends a bounded static SPF policy analysis: nested includes and

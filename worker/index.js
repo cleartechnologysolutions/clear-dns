@@ -603,6 +603,7 @@ async function apiResponse(request) {
       return Response.json(Object.fromEntries(entries), { headers: noStoreHeaders("application/json") });
     }
 
+    if(mode==="ns-compare")return await nsCompareApi(request,domain);
     if(mode==="ptr"){
       if(request.method!=="POST")return Response.json({error:"Use POST."},{status:405});
       const raw=await request.text();if(raw.length>4096)return Response.json({error:"Batch too large."},{status:400});
@@ -1000,7 +1001,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 25</p>
+          <p class="brand-subtitle">Build 26</p>
         </div>
       </div>
     </header>
@@ -1018,6 +1019,7 @@ function pageResponse() {
 
           <div class="actions">
             <button type="button" class="secondary" id="audit">Standard Records</button>
+            <button type="button" class="secondary" id="ns-compare" disabled title="Finish Standard Records first">NS Compare</button>
             <button type="button" class="secondary" id="ptr" disabled title="Finish Standard Records for this domain first">Reverse DNS / PTR</button>
             <button type="button" class="secondary" id="ports" disabled aria-describedby="web-prerequisite" title="Run Standard Records and wait for it to finish">Check web ports</button>
             <button type="button" class="secondary" id="domain-info">Domain info</button>
@@ -1040,12 +1042,13 @@ function pageResponse() {
         <div class="scan-status">
           <div class="status" id="status" role="status" aria-live="polite">Enter a domain and choose a tool.</div>
           <progress id="scan-progress" max="100" value="0" aria-label="Current scan phase progress"></progress>
-          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Web Ports and PTR will unlock automatically.</p>
+          <p id="web-prerequisite" role="status" aria-live="polite" class="web-prerequisite"><strong>Step 1:</strong> Run Standard Records and wait for the scan to finish.<br><strong>Step 2:</strong> Web Ports, PTR and NS Compare will unlock automatically.</p>
         </div>
         <div class="result-head">
           <p class="result-title" id="result-title">Results</p>
           <div class="result-actions">
             <button type="button" class="secondary" id="refresh-health" hidden aria-label="Refresh DNS Health">↻ Refresh</button>
+            <button type="button" class="secondary" id="refresh-compare" hidden>↻ Refresh</button><button type="button" class="secondary" id="stop-compare" hidden>Stop comparison</button>
             <button type="button" class="secondary" id="refresh-ptr" hidden aria-label="Refresh PTR records">↻ Refresh</button>
             <button type="button" class="secondary" id="retry-crt" hidden>Retry crt.sh only</button>
             <button type="button" class="secondary" id="rescan-standard" hidden title="Run Standard Records again" aria-label="Refresh Standard Records">↻ Refresh</button>
@@ -1084,13 +1087,62 @@ function pageResponse() {
     let showWildcards = false;
     let currentAudit = null, resultView="";
     function setResultView(view){
+      if(view!=="compare")compareRunning=false;
       resultView=view;
+      document.getElementById("refresh-compare").hidden=view!=="compare";
+      document.getElementById("stop-compare").hidden=view!=="compare"||!compareRunning;
       document.getElementById("refresh-health").hidden=view!=="health";
       refreshPtrButton.hidden=view!=="ptr";
       rescanStandardButton.hidden=view!=="audit";
       rescanWebButton.hidden=view!=="web";
       updateWebButton();
     }
+    const compareCache=new Map();let compareRunning=false;
+    function comparisonTargets(data){const tasks=new Map();for(const c of data.checks||[])if(c.answers?.length&&['A','AAAA','CNAME','MX','TXT','NS','SOA','CAA'].includes(c.type)){const name=c.name.toLowerCase().replace(/\\.$/,'');tasks.set(name+'|'+c.type,{name,type:c.type,scan:c.answers.map(a=>a.value),sources:{}})}return [...tasks.values()]}
+    function compareVerdict(row,servers){
+      const auth=servers.map(s=>row.sources[s]).filter(r=>r?.usable),pub=['Cloudflare','Google'].map(s=>row.sources[s]).filter(r=>r?.usable);
+      const flags=[];if(new Set(auth.map(r=>r.signature)).size>1)flags.push('NS DISAGREE');
+      if(auth.length&&pub.some(p=>auth.some(a=>p.signature!==a.signature)))flags.push('PUBLIC DIFFERS');
+      if(new Set(pub.map(r=>r.signature)).size>1)flags.push('PUBLIC RESOLVERS DISAGREE');
+      if(auth.length+pub.length<servers.length+2)flags.push('INCOMPLETE');return flags.length?flags.join(' / '):'MATCH';
+    }
+    function renderCompare(data){
+      setResultView('compare');resultTitle.textContent='NS Compare';
+      const lines=['AUTHORITATIVE NS COMPARISON','Domain: '+data.domain,'Started: '+data.started,'Queries: '+data.rows.length+' discovered name/type pairs · '+data.done+' of '+data.total+' source checks complete','Nameservers: '+data.servers.join(', '),'Public resolvers: Cloudflare + Google',''];
+      if(data.limited)lines.push('INCOMPLETE: only the first 16 published NS servers can be checked.');
+      lines.push('Order and TTL differences are ignored. CNAME targets outside the queried owner are excluded.','Different answers can be intentional (geo-DNS/load balancing) or cached during propagation.','Non-authoritative referrals, blocked connections and errors are INCOMPLETE, never a match.','All resolved scan checks are included, including hidden wildcard matches and crt.sh finds.','');
+      let different=0,incomplete=0,matches=0;const sections=[];
+      for(const row of data.rows){const verdict=compareVerdict(row,data.servers);if(verdict.includes('DIFFER')||verdict.includes('DISAGREE'))different++;if(verdict.includes('INCOMPLETE'))incomplete++;if(verdict==='MATCH')matches++;
+        const block=[verdict+'  '+row.name+' '+row.type,'  Saved scan: '+row.scan.join(' | ')];
+        for(const source of [...data.servers,'Cloudflare','Google']){const r=row.sources[source];block.push('  '+source+': '+(!r?'PENDING':r.usable?r.status+' '+(r.values.join(' | ')||'(no records)')+(r.answers?.length?' [TTL '+[...new Set(r.answers.map(a=>a.ttl))].join(', ')+']':''):'UNVERIFIED · '+r.status+' · '+r.note));}
+        sections.push({rank:verdict==='MATCH'?2:verdict.includes('INCOMPLETE')?1:0,block});
+      }
+      lines.push(different+' records differ · '+incomplete+' incomplete · '+matches+' match', '');
+      sections.sort((a,b)=>a.rank-b.rank);for(const section of sections)lines.push(...section.block,'');
+      lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
+      document.getElementById('stop-compare').hidden=!compareRunning;
+    }
+    async function runCompare(force=false){
+      const domain=cleanDomain(domainInput.value).toLowerCase();if(auditRunning||savedAudit?.domain!==domain||!savedAudit.data){setStatus('Run Standard Records and wait for it to finish before NS Compare.');return;}
+      const sequence=++taskSequence;compareRunning=false;setResultView('compare');if(!force&&compareCache.has(domain)){renderCompare(compareCache.get(domain));setStatus('Showing saved NS comparison. Use Refresh to query again.');return;}
+      compareRunning=true;document.getElementById('stop-compare').hidden=false;setStatus('Discovering authoritative nameservers…');
+      try{
+        const u=new URL('/api/lookup',location.origin);u.searchParams.set('name',domain);u.searchParams.set('mode','health');const res=await fetch(u);const inventory=await res.json();if(!res.ok)throw Error(inventory.error||'NS discovery failed.');if(sequence!==taskSequence||!compareRunning)return;
+        const rows=comparisonTargets(savedAudit.data),sources=['public',...inventory.servers];const data={domain,started:new Date().toLocaleString(),rows,servers:inventory.servers,limited:inventory.limited,done:0,total:rows.length*(inventory.servers.length+2)};
+        compareCache.set(domain,data);renderCompare(data);
+        for(let i=0;i<rows.length;i+=4)for(const source of sources){
+          if(sequence!==taskSequence||!compareRunning)return;const batch=rows.slice(i,i+4);setStatus('NS Compare: '+data.done+' of '+data.total+' · '+(source==='public'?'Public resolvers':source));
+          u.searchParams.set('mode','ns-compare');let checks;
+          try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source,tasks:batch.map(({name,type})=>({name,type}))})});const result=await r.json();if(!r.ok)throw Error(result.error||'Comparison failed.');checks=result.checks;}catch(e){checks=batch.map(t=>({...t,sources:Object.fromEntries((source==='public'?['Cloudflare','Google']:[source]).map(s=>[s,{usable:false,status:'ERROR',note:e.message,values:[]}]))}));}
+          if(sequence!==taskSequence||!compareRunning)return;for(const check of checks){const row=batch.find(t=>t.name===check.name&&t.type===check.type);if(row)Object.assign(row.sources,check.sources)}data.done+=batch.length*(source==='public'?2:1);renderCompare(data);
+        }
+        setStatus('Done. NS comparison complete. Standard Records were not rescanned.');
+      }catch(e){if(sequence===taskSequence)setStatus(e.message||'NS comparison failed.');}finally{if(sequence===taskSequence){compareRunning=false;document.getElementById('stop-compare').hidden=true;updateWebButton();}}
+    }
+    document.getElementById('ns-compare').addEventListener('click',()=>runCompare());
+    document.getElementById('refresh-compare').addEventListener('click',()=>runCompare(true));
+    document.getElementById('stop-compare').addEventListener('click',()=>{++taskSequence;compareRunning=false;document.getElementById('stop-compare').hidden=true;setStatus('Stopped. Partial results retained; Refresh runs the comparison again.');});
+
     const standardCache=new Map(),webCache=new Map(),ptrCache=new Map();
     let savedAudit = null, discoveredWebHosts = [], webBusy = false, auditRunning = false;
     function updateWebButton(){
@@ -1100,23 +1152,25 @@ function pageResponse() {
       document.getElementById("refresh-health").disabled=false;
       ptrButton.disabled=refreshPtrButton.disabled=auditRunning||!ready;
       portsButton.disabled=auditRunning||!ready;
+      document.getElementById("ns-compare").disabled=auditRunning||!ready;
+      document.getElementById("refresh-compare").disabled=auditRunning||!ready;
       for(const button of [healthButton,domainInfoButton,mailButton,auditButton])button.disabled=false;
       rescanStandardButton.disabled=auditRunning;
       rescanWebButton.disabled=auditRunning||!ready;
       portsButton.textContent=ready&&webCache.has(savedAudit.domain)?"Web ports results":"Check web ports";
       const hint=document.getElementById("web-prerequisite");
-      if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Web Ports and PTR will unlock automatically.";}
+      if(auditRunning){hint.textContent="Scan in progress: The results appearing now are partial. Wait for Standard Records to finish; Web Ports, PTR and NS Compare will unlock automatically.";}
       else if(webBusy&&resultView==="ptr"){hint.textContent="Checking reverse DNS for IP addresses from the saved Standard Records scan.";}
       else if(webBusy&&resultView==="health"){hint.textContent="Comparing published authoritative nameservers.";}
       else if(webBusy){hint.textContent="Step 2 in progress: Checking ports 80 and 443 on the discovered hostnames.";}
-      else if(ready){hint.textContent="Step 1 complete. Ready for step 2: Click Check web ports to check ports 80 and 443 on "+savedAudit.hosts.length+" discovered hostnames.";}
-      else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Web Ports and PTR will unlock automatically.";}
+      else if(ready){hint.textContent="Step 1 complete. Web Ports, PTR and NS Compare are ready. Web ports can check "+savedAudit.hosts.length+" discovered hostnames.";}
+      else{hint.textContent="Step 1: Run Standard Records and wait for the scan to finish. Step 2: Web Ports, PTR and NS Compare will unlock automatically.";}
       portsButton.title=hint.textContent;
       renderHistory();
     }
     domainInput.addEventListener("input",()=>{
       const domain=cleanDomain(domainInput.value).toLowerCase();
-      if(domain!==activeScanDomain){++lookupSequence;++taskSequence;auditRunning=false;webBusy=false;latestScan=null;activeScanDomain=domain;setStatus("Choose a tool for this domain.");}
+      if(domain!==activeScanDomain){++lookupSequence;++taskSequence;auditRunning=false;webBusy=false;latestScan=null;activeScanDomain=domain;compareRunning=false;setStatus("Choose a tool for this domain.");}
       updateWebButton();
     });
 
@@ -1682,7 +1736,7 @@ function reverseDnsName(value){
       if(mode==="audit")activeScanDomain=domain.toLowerCase();
       currentAudit = null;
       auditRunning=mode==="audit";updateWebButton();
-      if(mode==="audit"){standardCache.delete(domain);webCache.delete(domain);ptrCache.delete(domain);savedAudit=null;discoveredWebHosts=[];updateWebButton();}
+      if(mode==="audit"){standardCache.delete(domain);webCache.delete(domain);ptrCache.delete(domain);compareCache.delete(domain);savedAudit=null;discoveredWebHosts=[];updateWebButton();}
       showWildcards = false;
 
       const url = new URL(location.href);
@@ -1754,7 +1808,7 @@ function reverseDnsName(value){
       savedAudit={domain,hosts:discoveredWebHosts.slice(),data};
       standardCache.set(domain,savedAudit);
       if(savedAudit.hosts.join("|")!==previousHosts)webCache.delete(domain);
-      ptrCache.delete(domain);
+      ptrCache.delete(domain);compareCache.delete(domain);
       rememberScan(false);
       updateWebButton();
       setScanStatus(data.crtNote?.startsWith("crt.sh discovery incomplete")?"Done. "+data.crtNote+" Use Retry crt.sh only.":"Done. Certificate discovery updated; Standard Records preserved.");
@@ -1889,7 +1943,7 @@ function reverseDnsName(value){
       const button=event.target.closest("[data-scan]");if(!button||auditRunning||webBusy)return;
       const entry=recentScans[Number(button.dataset.scan)];if(!entry)return;
       clearTimeout(autoScanTimer);++lookupSequence;domainInput.value=entry.domain;activeScanDomain=entry.domain;
-      const data=JSON.parse(JSON.stringify(entry.data));savedAudit={domain:entry.domain,hosts:entry.hosts.slice(),data};standardCache.set(entry.domain,savedAudit);
+      compareCache.delete(entry.domain);const data=JSON.parse(JSON.stringify(entry.data));savedAudit={domain:entry.domain,hosts:entry.hosts.slice(),data};standardCache.set(entry.domain,savedAudit);
       if(entry.ptr)ptrCache.set(entry.domain,entry.ptr);else ptrCache.delete(entry.domain);
       if(entry.web)webCache.set(entry.domain,entry.web);else webCache.delete(entry.domain);
       showWildcards=false;setResultView("audit");renderAudit(data);updateWebButton();
@@ -2104,6 +2158,41 @@ async function dnsHealthServer(domain,server){
    catch(e){results.push({type,error:e.message});break;}
  }
  return {server,results};
+}
+
+// Compare RRsets, not resolver TTL countdowns or unrelated CNAME target answers.
+function canonicalDnsValue(type,value){
+ const v=String(value).trim();
+ if(type==='TXT')return decodeTxtPresentation(v);
+ if(type==='AAAA'){try{return new URL('http://['+v+']/').hostname.toLowerCase()}catch{return v.toLowerCase()}}
+ if(type==='CAA'){const m=v.match(/^(\d+)\s+(\S+)\s+([\s\S]+)$/);return m?m[1]+' '+m[2].toLowerCase()+' '+m[3]:v;}
+ return v.toLowerCase().replace(/\.(?=\s|$)/g,'').replace(/\s+/g,' ');
+}
+function compareDnsAnswer(raw,name,type,direct=false){
+ const status=raw.status||STATUS_TEXT[raw.Status]||'ERROR';
+ const records=(raw.answers||raw.Answer||[]).map(a=>({name:String(a.name||'').toLowerCase().replace(/\.$/,''),type:typeof a.type==='number'?Object.keys(TYPE_CODES).find(t=>TYPE_CODES[t]===a.type):a.type,value:a.value??a.data,ttl:a.ttl??a.TTL}));
+ const answers=records.filter(a=>a.name===name&&(a.type===type||a.type==='CNAME'));
+ const referral=(raw.authority||[]).filter(a=>a.type==='NS').map(a=>a.name+' → '+a.value);
+ const usable=['NOERROR','NXDOMAIN'].includes(status)&&!(raw.truncated||raw.TC)&&(!direct||raw.authoritative===true);
+ const values=[...new Set(answers.map(a=>a.type+' '+canonicalDnsValue(a.type,a.value)))].sort();
+ return {status,usable,authoritative:raw.authoritative??null,values,answers,signature:usable?JSON.stringify([status,values]):null,note:(raw.truncated||raw.TC)?'Truncated answer':direct&&!raw.authoritative?(referral.length?'Delegation/referral: '+referral.join(', '):'Not an authoritative response'):!usable?'Lookup did not return a usable answer':'',address:raw.address,ms:raw.ms};
+}
+async function comparePublicDns(name,type,google){
+ if(!google)return compareDnsAnswer(await lookupDns(name,type),name,type);
+ const c=new AbortController(),timer=setTimeout(()=>c.abort(),10000);
+ try{const r=await fetch('https://dns.google/resolve?name='+encodeURIComponent(name)+'&type='+type,{signal:c.signal,redirect:'manual',headers:{accept:'application/dns-json'}});if(!r.ok)throw Error('Google DNS HTTP '+r.status);return compareDnsAnswer(await r.json(),name,type)}finally{clearTimeout(timer)}
+}
+async function nsCompareApi(request,domain){
+ if(request.method!=='POST')return Response.json({error:'Use POST.'},{status:405});
+ const text=await request.text();if(text.length>8192)return Response.json({error:'Batch too large.'},{status:400});
+ let body;try{body=JSON.parse(text);if(!Array.isArray(body.tasks)||!body.tasks.length||body.tasks.length>4||!body.tasks.every(t=>t&&typeof t.name==='string'&&t.name===manualQueryName(t.name+'.','')&&(t.name===domain||t.name.endsWith('.'+domain))&&['A','AAAA','CNAME','MX','TXT','NS','SOA','CAA'].includes(t.type)))throw Error();}catch{return Response.json({error:'Provide 1–4 in-domain record queries.'},{status:400});}
+ const source=String(body.source||'public');
+ if(source!=='public'){const inventory=await dnsHealthInventory(domain);if(!inventory.servers.includes(source))return Response.json({error:'Server is not a published NS for this domain.'},{status:400});}
+ const checked=await Promise.all(body.tasks.map(async t=>{
+  const safe=async job=>{try{return await job()}catch(e){return {status:'ERROR',usable:false,values:[],answers:[],signature:null,note:e.message||'Unable to query server'}}};
+  if(source==='public'){const cloudflare=await safe(()=>comparePublicDns(t.name,t.type,false));const google=await safe(()=>comparePublicDns(t.name,t.type,true));return {...t,sources:{Cloudflare:cloudflare,Google:google}}}
+  return {...t,sources:{[source]:await safe(async()=>compareDnsAnswer(await manualDnsLookup(source,t.name+'.','',t.type,false),t.name,t.type,true))}};
+ }));return Response.json({source,checks:checked,checkedAt:new Date().toISOString()},{headers:noStoreHeaders('application/json')});
 }
 
 export default {
