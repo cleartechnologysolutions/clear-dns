@@ -993,6 +993,8 @@ function pageResponse() {
         align-items: flex-start;
       }
     }
+
+.dns-summary{padding:16px;background:#123c35;border:1px solid #448c79;border-radius:8px}.dns-summary small{display:block;margin-top:8px;color:#b6d7ce}.dns-note{font-size:12px;color:#aebfd0;line-height:1.5}.dns-diff{border:1px solid #526b83;border-radius:8px;margin:18px 0;overflow:hidden}.dns-diff h3{font:600 15px monospace;margin:0;padding:14px 12px 4px;overflow-wrap:anywhere}.dns-verdict{font-size:11px;color:#ffd59a;padding:0 12px;margin:4px 0 12px}.dns-table-scroll{overflow-x:auto}.dns-compare-table{border-collapse:collapse;width:100%;table-layout:fixed;min-width:520px}.dns-compare-table th,.dns-compare-table td{vertical-align:top;padding:12px 8px;border:1px solid #34465c;text-align:left;overflow-wrap:anywhere}.dns-compare-table th{background:#172c41;font:600 12px monospace}.dns-answer b{display:block;font-size:11px;margin-bottom:10px}.dns-answer pre{white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.65 monospace;margin:0}.dns-answer small{display:block;color:#b5c3d4;margin-top:10px}.group-1{background:#122f39}.group-2{background:#49351b}.group-3{background:#392b50}.group-0{background:#362d31}.dns-authority{margin-top:24px}.dns-authority h2{font-size:20px}
   </style>
 </head>
 <body>
@@ -1001,7 +1003,7 @@ function pageResponse() {
       <div class="brand">
         <div>
           <p class="brand-title">DNS Tools</p>
-          <p class="brand-subtitle">Build 26</p>
+          <p class="brand-subtitle">Build 27</p>
         </div>
       </div>
     </header>
@@ -1108,18 +1110,21 @@ function pageResponse() {
     }
     function renderCompare(data){
       setResultView('compare');resultTitle.textContent='NS Compare';
-      const lines=['AUTHORITATIVE NS COMPARISON','Domain: '+data.domain,'Started: '+data.started,'Queries: '+data.rows.length+' discovered name/type pairs · '+data.done+' of '+data.total+' source checks complete','Nameservers: '+data.servers.join(', '),'Public resolvers: Cloudflare + Google',''];
-      if(data.limited)lines.push('INCOMPLETE: only the first 16 published NS servers can be checked.');
-      lines.push('Order and TTL differences are ignored. CNAME targets outside the queried owner are excluded.','Different answers can be intentional (geo-DNS/load balancing) or cached during propagation.','Non-authoritative referrals, blocked connections and errors are INCOMPLETE, never a match.','All resolved scan checks are included, including hidden wildcard matches and crt.sh finds.','');
-      let different=0,incomplete=0,matches=0;const sections=[];
-      for(const row of data.rows){const verdict=compareVerdict(row,data.servers);if(verdict.includes('DIFFER')||verdict.includes('DISAGREE'))different++;if(verdict.includes('INCOMPLETE'))incomplete++;if(verdict==='MATCH')matches++;
-        const block=[verdict+'  '+row.name+' '+row.type,'  Saved scan: '+row.scan.join(' | ')];
-        for(const source of [...data.servers,'Cloudflare','Google']){const r=row.sources[source];block.push('  '+source+': '+(!r?'PENDING':r.usable?r.status+' '+(r.values.join(' | ')||'(no records)')+(r.answers?.length?' [TTL '+[...new Set(r.answers.map(a=>a.ttl))].join(', ')+']':''):'UNVERIFIED · '+r.status+' · '+r.note));}
-        sections.push({rank:verdict==='MATCH'?2:verdict.includes('INCOMPLETE')?1:0,block});
+      const sources=[...data.servers,'Cloudflare','Google'];let matches=0,different=0,incomplete=0,pending=0;const cards=[],lines=['NS COMPARE · '+data.domain,'Checked: '+(data.updated||data.started),''];
+      for(const row of data.rows){
+        const verdict=compareVerdict(row,data.servers),diff=/DIFFER|DISAGREE/.test(verdict),missing=sources.some(s=>!row.sources[s]);
+        if(verdict==='MATCH'){matches++;continue}if(missing&&!diff){pending++;continue}if(diff)different++;if(verdict.includes('INCOMPLETE'))incomplete++;
+        lines.push(row.name+' '+row.type+' · '+verdict);const usable=sources.map(s=>row.sources[s]).filter(r=>r?.usable);const signatures=[...new Set(usable.map(r=>r.signature))];
+        const cells=sources.map(source=>{const r=row.sources[source];const group=r?.usable?signatures.indexOf(r.signature)+1:0;const label=!r?'Pending':!r.usable?'Unable to verify':diff?'Answer '+group:'Verified';
+          const answer=!r?'Waiting for this server':!r.usable?r.status+' · '+(r.note||'No usable answer'):r.status+'\\n'+(r.values.join('\\n')||'(no records)');
+          lines.push(source+': '+answer);return '<td class="dns-answer group-'+group+'"><b>'+escapeText(label)+'</b><pre>'+escapeText(answer)+'</pre>'+(r?.usable&&r.answers?.length?'<small>TTL '+escapeText([...new Set(r.answers.map(a=>a.ttl))].join(', '))+'</small>':'')+'</td>';});
+        const heading=row.name+' '+row.type;lines.push('');
+        cards.push({rank:diff?0:1,html:'<section class="dns-diff"><h3>'+escapeText(heading)+'</h3><p class="dns-verdict">'+escapeText(verdict)+'</p><div class="dns-table-scroll"><table class="dns-compare-table"><thead><tr>'+sources.map(s=>'<th scope="col">'+escapeText(s)+'</th>').join('')+'</tr></thead><tbody><tr>'+cells.join('')+'</tr></tbody></table></div></section>'});
       }
-      lines.push(different+' records differ · '+incomplete+' incomplete · '+matches+' match', '');
-      sections.sort((a,b)=>a.rank-b.rank);for(const section of sections)lines.push(...section.block,'');
-      lastText=lines.join('\\n');results.innerHTML='<div class="console-wrap"><pre class="console-output">'+escapeText(lastText)+'</pre></div>';
+      const summary=matches+' records match · '+different+' differ · '+incomplete+' incomplete'+(pending?' · '+pending+' pending':'');
+      const done=data.done===data.total&&!data.limited;const confirmation=done&&matches===data.rows.length&&data.rows.length?'All '+matches+' records match across every nameserver and both public resolvers.':summary;
+      lines.splice(2,0,summary);lastText=lines.join('\\n');
+      results.innerHTML='<div class="dns-summary"><strong>'+escapeText(confirmation)+'</strong><small>Last checked: '+escapeText(data.updated||data.started)+' · '+data.done+' / '+data.total+' checks</small></div>'+(data.limited?'<p>Incomplete: nameserver limit reached.</p>':'')+'<p class="dns-note">Matching records are hidden. Answer numbers identify matching groups; no server is assumed correct. TTL countdowns are ignored. Refresh to check propagation again.</p>'+cards.sort((a,b)=>a.rank-b.rank).map(c=>c.html).join('');
       document.getElementById('stop-compare').hidden=!compareRunning;
     }
     async function runCompare(force=false){
@@ -1134,7 +1139,7 @@ function pageResponse() {
           if(sequence!==taskSequence||!compareRunning)return;const batch=rows.slice(i,i+4);setStatus('NS Compare: '+data.done+' of '+data.total+' · '+(source==='public'?'Public resolvers':source));
           u.searchParams.set('mode','ns-compare');let checks;
           try{const r=await fetch(u,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({source,tasks:batch.map(({name,type})=>({name,type}))})});const result=await r.json();if(!r.ok)throw Error(result.error||'Comparison failed.');checks=result.checks;}catch(e){checks=batch.map(t=>({...t,sources:Object.fromEntries((source==='public'?['Cloudflare','Google']:[source]).map(s=>[s,{usable:false,status:'ERROR',note:e.message,values:[]}]))}));}
-          if(sequence!==taskSequence||!compareRunning)return;for(const check of checks){const row=batch.find(t=>t.name===check.name&&t.type===check.type);if(row)Object.assign(row.sources,check.sources)}data.done+=batch.length*(source==='public'?2:1);renderCompare(data);
+          if(sequence!==taskSequence||!compareRunning)return;for(const check of checks){const row=batch.find(t=>t.name===check.name&&t.type===check.type);if(row)Object.assign(row.sources,check.sources)}data.done+=batch.length*(source==='public'?2:1);data.updated=new Date().toLocaleString();renderCompare(data);
         }
         setStatus('Done. NS comparison complete. Standard Records were not rescanned.');
       }catch(e){if(sequence===taskSequence)setStatus(e.message||'NS comparison failed.');}finally{if(sequence===taskSequence){compareRunning=false;document.getElementById('stop-compare').hidden=true;updateWebButton();}}
@@ -2068,7 +2073,27 @@ async function manualDnsLookup(server,query,zone,type,recursive=true){
     return await Promise.race([job,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('DNS server timed out after 10 seconds. TCP port 53 may be blocked.')),10000);})]);
   }finally{clearTimeout(timer);if(socket){try{await socket.close();}catch{}}try{reader?.releaseLock();writer?.releaseLock();}catch{}}
 }
+async function findAuthority(name){
+ const labels=name.split('.');
+ for(let i=0;i<labels.length-1&&i<12;i++){
+   const zone=labels.slice(i).join('.'),r=await lookupDns(zone,'NS');
+   if(![0,3].includes(r.Status))throw Error('NS discovery incomplete at '+zone+': '+r.StatusText);
+   // Ignore NS records returned for other owners or alias targets.
+   const servers=[...new Set((r.Answer||[]).filter(a=>a.type===2&&String(a.name||'').toLowerCase().replace(/\.$/,'')===zone).map(a=>a.data.toLowerCase().replace(/\.$/,'')))];
+   if(servers.length)return {zone,servers:servers.slice(0,16),limited:servers.length>16};
+ }throw Error('Could not discover the authoritative zone for this query.');
+}
+async function manualAuthorityApi(request){
+ try{const q=new URL(request.url).searchParams,name=manualQueryName(q.get('query'),q.get('zone')),type=String(q.get('type')||'A').toUpperCase();if(!Object.hasOwn(MANUAL_TYPES,type))throw Error('Unsupported type.');
+ if(q.get('action')==='ns-inventory')return Response.json({name,type,...await findAuthority(name)},{headers:noStoreHeaders('application/json')});
+ const zone=normalizeName(q.get('authority-zone')),server=String(q.get('ns')||'').toLowerCase();if(!zone||!(name===zone||name.endsWith('.'+zone)))throw Error('Invalid authoritative zone.');
+ const inventory=await dnsHealthInventory(zone);if(!inventory.servers.includes(server))throw Error('Server is not a published nameserver for this zone.');
+ const result=await manualDnsLookup(server,name+'.','',type,false);return Response.json(result,{headers:noStoreHeaders('application/json')});
+ }catch(e){return Response.json({error:e.message||'Authoritative lookup failed.'},{status:502,headers:noStoreHeaders('application/json')})}
+}
+
 async function manualLookupApi(request){
+  if(["ns-inventory","ns-query"].includes(new URL(request.url).searchParams.get("action")))return manualAuthorityApi(request);
   try{const q=new URL(request.url).searchParams;return Response.json(await manualDnsLookup(q.get('server'),q.get('query'),q.get('zone'),q.get('type')),{headers:noStoreHeaders('application/json')});}
   catch(e){return Response.json({error:e.message||'DNS lookup failed.'},{status:502,headers:noStoreHeaders('application/json')});}
 }
@@ -2082,17 +2107,31 @@ async function manualLookupPage(){
   <label for="record-type">Record type</label><select id="record-type">${Object.keys(MANUAL_TYPES).map(t=>'<option>'+t+'</option>').join('')}</select>
   <p>Queries run from the cloud. Custom servers must accept TCP port 53. Cloudflare 1.1.1.1 / 1.0.0.1 use DNS over HTTPS. ANY may return limited results; it is not a zone transfer.</p>
   <button id="submit-lookup">Look up</button></form></section>
-  <section class="panel" style="margin-top:24px"><div class="result-head"><p>DNS answer</p><button id="copy-manual" type="button">Copy results</button></div><p id="manual-status" role="status" style="padding:0 20px">Ready.</p><pre id="manual-output" class="console-output" style="overflow:auto;padding:20px">Enter a query to begin.</pre></section></main>`;
+  <section class="panel" style="margin-top:24px"><div class="result-head"><p>DNS answer</p><button id="refresh-manual" type="button" disabled>↻ Refresh all</button><button id="copy-manual" type="button">Copy results</button></div><p id="manual-status" role="status" style="padding:0 20px">Ready.</p><pre id="manual-output" class="console-output" style="overflow:auto;padding:20px">Enter a query to begin.</pre></section><section class="panel dns-authority"><div class="result-head"><h2>Authoritative nameservers</h2></div><p id="authority-status" style="padding:0 20px">Runs automatically with each lookup.</p><div id="authority-results" style="padding:16px"></div></section></main>`;
   const script=`<script>
   const form=document.getElementById('manual-form'),out=document.getElementById('manual-output'),status=document.getElementById('manual-status'),button=document.getElementById('submit-lookup');
-  form.addEventListener('submit',async e=>{e.preventDefault();button.disabled=true;status.textContent='Querying selected DNS server...';try{
-    const q=new URLSearchParams();for(const id of ['server','zone','query'])q.set(id,document.getElementById(id).value);q.set('type',document.getElementById('record-type').value);
-    const r=await fetch('/api/manual-dns?'+q),d=await r.json();if(!r.ok)throw Error(d.error);
-    const lines=['DNS LOOKUP','Server: '+d.server+' ('+d.address+')','Transport: '+d.transport,'Query: '+d.name+' '+d.type,'Status: '+d.status,'Authoritative: '+d.authoritative,'Truncated: '+d.truncated,'Time: '+d.ms+' ms'];
-    for(const key of ['answers','authority','additional']){lines.push('',key.toUpperCase());for(const row of d[key])lines.push(row.name+'  '+row.ttl+'  '+row.type+'  '+row.value);if(!d[key].length)lines.push('(none)');}
-    out.textContent=lines.join('\\n');status.textContent='Done.';
-  }catch(e){status.textContent=e.message;out.textContent='Lookup failed; no answer was obtained.';}finally{button.disabled=false;}});
-  document.getElementById('copy-manual').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(out.textContent);status.textContent='Copied.';}catch{status.textContent='Select and copy the result text manually.';}});
+  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  let authorityText='',lastQuery=null;
+  async function lookupAuthorities(q){
+    const area=document.getElementById('authority-results'),note=document.getElementById('authority-status');area.innerHTML='';authorityText='';note.textContent='Discovering authoritative nameservers…';
+    const query=new URLSearchParams(q);query.set('action','ns-inventory');
+    try{const response=await fetch('/api/manual-dns?'+query),inventory=await response.json();if(!response.ok)throw Error(inventory.error||'NS discovery failed.');
+      const rows=new Map();const render=()=>{const lines=['AUTHORITATIVE NS · '+inventory.zone];area.innerHTML='<div class="dns-table-scroll"><table class="dns-compare-table"><thead><tr>'+inventory.servers.map(s=>'<th scope="col">'+esc(s)+'</th>').join('')+'</tr></thead><tbody><tr>'+inventory.servers.map(server=>{const r=rows.get(server);let text='Checking…';if(r){if(r.error)text='UNVERIFIED\\n'+r.error;else{text=(r.authoritative?'Authoritative':'UNVERIFIED: non-authoritative')+' · '+r.status+(r.truncated?' · TRUNCATED':'')+'\\n';for(const section of ['answers','authority']){text+='\\n'+section.toUpperCase()+'\\n'+(r[section]?.length?r[section].map(a=>a.name+' '+a.type+' '+a.value+' [TTL '+a.ttl+']').join('\\n'):'(none)')}}}lines.push(server+'\\n'+text);return '<td class="dns-answer '+(r&&!r.error&&r.authoritative?'group-1':'group-0')+'"><pre>'+esc(text)+'</pre></td>'}).join('')+'</tr></tbody></table></div>';authorityText=lines.join('\\n\\n')};render();
+      query.set('action','ns-query');query.set('authority-zone',inventory.zone);
+      for(const server of inventory.servers){query.set('ns',server);note.textContent='Checking '+server+' · '+rows.size+' of '+inventory.servers.length;try{const r=await fetch('/api/manual-dns?'+query),d=await r.json();rows.set(server,r.ok?d:{error:d.error||'Lookup failed.'})}catch(e){rows.set(server,{error:e.message})}render()}
+      note.textContent='Checked '+new Date().toLocaleString()+' · Zone: '+inventory.zone+(inventory.limited?' · INCOMPLETE: first 16 NS only':'')+'. Refresh to check propagation again.';
+    }catch(e){note.textContent=e.message;authorityText='Authoritative lookup incomplete: '+e.message;}
+  }
+  async function runManual(q){button.disabled=true;document.getElementById('refresh-manual').disabled=true;status.textContent='Querying selected DNS server…';
+    const authoritative=lookupAuthorities(q);
+    try{const r=await fetch('/api/manual-dns?'+q),d=await r.json();if(!r.ok)throw Error(d.error);
+      const lines=['DNS LOOKUP','Server: '+d.server+' ('+d.address+')','Transport: '+d.transport,'Query: '+d.name+' '+d.type,'Status: '+d.status,'Authoritative: '+d.authoritative,'Truncated: '+d.truncated,'Time: '+d.ms+' ms'];
+      for(const key of ['answers','authority','additional']){lines.push('',key.toUpperCase());for(const row of d[key])lines.push(row.name+'  '+row.ttl+'  '+row.type+'  '+row.value);if(!d[key].length)lines.push('(none)');}out.textContent=lines.join('\\n');status.textContent='Selected server checked.';
+    }catch(e){status.textContent=e.message;out.textContent='Lookup failed; no answer was obtained.';}finally{await authoritative;button.disabled=false;document.getElementById('refresh-manual').disabled=false;}
+  }
+  form.addEventListener('submit',async e=>{e.preventDefault();if(button.disabled)return;const q=new URLSearchParams();for(const id of ['server','zone','query'])q.set(id,document.getElementById(id).value);q.set('type',document.getElementById('record-type').value);lastQuery=q;await runManual(q)});
+  document.getElementById('refresh-manual').addEventListener('click',()=>{if(lastQuery&&!button.disabled)return runManual(new URLSearchParams(lastQuery))});
+  document.getElementById('copy-manual').addEventListener('click',async()=>{try{await navigator.clipboard.writeText(out.textContent+"\\n\\n"+authorityText);status.textContent='Copied.';}catch{status.textContent='Select and copy the result text manually.';}});
   </script>`;
   return new Response(base.replace(/<main>[\s\S]*?<\/main>/,()=>main).replace(/<script>[\s\S]*?<\/script>/,()=>script),{headers:noStoreHeaders('text/html')});
 }

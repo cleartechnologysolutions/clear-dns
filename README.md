@@ -1,5 +1,14 @@
 # DNS Tools
 
+## Build 27 — propagation comparison layout
+
+NS Compare hides matching record details and confirms the matching count. If any server differs, the record gets a side-by-side table with every authoritative server plus Cloudflare and Google. Numbered answer groups identify agreement without relying on color or assuming a particular server is correct. Failed/incomplete checks stay visible separately from successful matches. The result-header Refresh button rechecks the discovered records; timestamps and progress show the current check. No automatic polling.
+
+DNS Lookup now automatically discovers the closest enclosing authoritative zone (bounded to 12 ancestor checks), queries each published NS nonrecursively, and displays those server answers in columns below the selected resolver. Refresh all repeats both selected-resolver and authoritative lookups. The selected resolver and authoritative discovery run independently so failure of one does not suppress the other. Existing TCP/53 reachability limitations still apply; no UDP transport or external relay was added.
+
+Deploy the same way as before; no configuration changes. Look for Build 27.
+
+
 ## Build 26 — NS Compare
 
 Run Standard Records to completion, then click NS Compare. It reuses every resolved name/type pair from that scan (including hidden wildcard matches and crt.sh finds); it does not repeat hostname enumeration. Queries A, AAAA, CNAME, MX, TXT, NS, SOA and CAA.
